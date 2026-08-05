@@ -73,19 +73,7 @@ body {
   overflow: hidden;
 }
 
-.header-logo {
-  height: 12px;
-  /* height: 1.6vh; */
-  width: 12px;
-  /* width: 1.6vh; */
-}
-
-.header-logoHax {
-  height: 12px;
-  /* height: 1.6vh; */
-  width: 24px;
-  /* width: 3.2vh; */
-}
+/* Removed unused header logo styles */
 
 .header .title {
   display: inline-block;
@@ -103,6 +91,91 @@ body {
 .header>* {
   margin-right: 15px;
 }
+
+/* Undo/Redo butonları için özel stiller */
+#button_undo, #button_redo {
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+#button_undo:hover, #button_redo:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+#button_undo:disabled, #button_redo:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+#button_undo:active, #button_redo:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+
+/* History butonları için özel stiller */
+#button_history_info, #button_clear_history {
+  transition: all 0.2s ease;
+  border-radius: 4px;
+  font-weight: bold;
+}
+
+#button_history_info:hover, #button_clear_history:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+#button_history_info:active, #button_clear_history:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+
+/* Tooltip stilleri */
+[title] {
+  position: relative;
+}
+
+[title]:hover::after {
+  content: attr(title);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.8);
+  color: white;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 1000;
+  margin-bottom: 5px;
+}
+
+/* Çoklu seçim için görsel iyileştirmeler */
+#mousepos {
+  transition: all 0.3s ease;
+  cursor: help;
+}
+
+#mousepos[title*="Seçili"] {
+  background: rgba(76, 175, 80, 0.2);
+  border-radius: 4px;
+  padding: 2px 6px;
+  border: 1px solid rgba(76, 175, 80, 0.5);
+}
+
+/* Seçim kutusu için iyileştirmeler */
+canvas {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+
 
 ul.menu {
   display: block;
@@ -346,6 +419,26 @@ select.prop {
 input.prop.error,
 select.prop.error {
   border: 3px solid #dd0000;
+}
+
+input.prop.prop-x {
+  width: 45px;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right-width: 1px;
+  padding: 0 5px;
+  text-align: center;
+  clear: none;
+}
+
+input.prop.prop-y {
+  width: 45px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left-width: 1px;
+  padding: 0 5px;
+  text-align: center;
+  clear: right;
 }
 
 #left_tabs {

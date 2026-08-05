@@ -20,6 +20,10 @@ function PropertiesTab() {
     if (mainMode === 'propertiesTab') $("#table").fadeTo(300, 1);
   }, [mainMode])
 
+  useEffect(() => {
+    setStadiumProperties(checkStadium(JSON.parse(JSON.stringify(stadium))));
+  }, [stadium]);
+
   function parseValue(target) {
     if (target.id.endsWith('gravity')) {
       var a = target.value.split(',')
@@ -30,13 +34,14 @@ function PropertiesTab() {
     } else if (target.id.endsWith('cGroup') || target.id.endsWith('cMask')) {
       var a = target.value.split(',');
       for (let x of a) {
-        if (!['ball', 'red', 'blue', 'wall', 'redKO', 'blueKO', 'all', 'kick', 'score', 'c0', 'c1', 'c2', 'c3'].includes(x)) return false;
+        if (!['ball', 'red', 'blue', 'wall', 'redKO', 'blueKO', 'all', 'kick', 'score', 'c0', 'c1', 'c2', 'c3', 'none'].includes(x)) return false;
       }
       return a;
     } else if (target.id.endsWith('color')) {
       if (!target.value.match('^[A-Fa-f0-9]{6}$')) return false;
       return target.value;
     } else {
+      if (target.id.includes('strength') && target.value === 'rigid') return 'rigid';
       if (isNaN(target.value)) return false;
       else return Number(target.value);
     }
@@ -82,14 +87,12 @@ function PropertiesTab() {
         "kickingDamping": 0.96,
         "kickStrength": 5,
         "kickback": 0,
-
       },
 
       "ballPhysics": {
         "radius": 10,
         "bCoef": 0.5,
-        "cMask": ["all"
-        ],
+        "cMask": ["all"],
         "damping": 0.99,
         "invMass": 1,
         "gravity": [0, 0],
@@ -105,9 +108,11 @@ function PropertiesTab() {
     for (let key of keys) {
       if (stadiumF.playerPhysics[key] === undefined) stadiumF.playerPhysics[key] = defaultStadium.playerPhysics[key];
     }
-    keys = Object.keys(defaultStadium.ballPhysics);
-    for (let key of keys) {
-      if (stadiumF.ballPhysics[key] === undefined) stadiumF.ballPhysics[key] = defaultStadium.ballPhysics[key];
+    if (typeof stadiumF.ballPhysics !== 'string') {
+      keys = Object.keys(defaultStadium.ballPhysics);
+      for (let key of keys) {
+        if (stadiumF.ballPhysics[key] === undefined) stadiumF.ballPhysics[key] = defaultStadium.ballPhysics[key];
+      }
     }
     return stadiumF;
   }
@@ -164,48 +169,50 @@ function PropertiesTab() {
     }
     if (!v) {
       e.target.classList.remove('error');
-      setStadiumProperties(stadiumF);
+      setStadiumProperties(checkStadium(JSON.parse(JSON.stringify(stadium))));
     } else {
+      let nextStadium;
       if (secondProp) {
-        stadiumF[prop] = { ...stadiumF[prop], [secondProp]: v }
+        nextStadium = { ...stadiumProperties, [prop]: { ...stadiumProperties[prop], [secondProp]: v } };
       } else {
-        stadiumF[prop] = v;
+        nextStadium = { ...stadiumProperties, [prop]: v };
       }
       e.target.classList.remove('error');
-      if (secondProp) {
-        setStadiumProperties(prevState => {
-          return { ...prevState, [prop]: { ...prevState[prop], [secondProp]: v } }
-        });
-      } else {
-        setStadiumProperties(prevState => {
-          return { ...prevState, [prop]: v }
-        });
-      }
+      setStadiumProperties(nextStadium);
+      dispatch(editStadium(nextStadium));
     }
   }
 
   function handleTraitBlur(e) {
-    // var prop = e.target.id.substring(6);
-    // var v = parseValue(e.target);
-    // if (!v) {
-    //   e.target.classList.remove('error');
-    // } else {
-    // }
+  }
+
+  function handleDisc0Toggle(e) {
+    let nextStadium;
+    if (e.target.checked) {
+      nextStadium = { ...stadiumProperties, ballPhysics: "disc0" };
+    } else {
+      const defaultBp = {
+        radius: 10, bCoef: 0.5, cMask: ["all"], damping: 0.99,
+        invMass: 1, gravity: [0, 0], color: "ffffff", cGroup: ["ball"]
+      };
+      nextStadium = { ...stadiumProperties, ballPhysics: defaultBp };
+    }
+    setStadiumProperties(nextStadium);
+    dispatch(editStadium(nextStadium));
   }
 
   function handleSelect(e) {
     var prop = e.target.id.substring(5);
+    let nextStadium;
     if (prop === "bg_type") {
-      stadiumF.bg = { ...stadiumF.bg, type: e.target.value }
-      if (stadiumF.bg.type === 'grass') stadiumF.bg.color = '718C5A'
-      else if (stadiumF.bg.type === 'hockey') stadiumF.bg.color = '555555'
-      setStadiumProperties(prevState => {
-        return { ...prevState, bg: { ...prevState.bg, type: e.target.value } }
-      });
+      nextStadium = { ...stadiumProperties, bg: { ...stadiumProperties.bg, type: e.target.value } };
+      if (nextStadium.bg.type === 'grass') nextStadium.bg.color = '718C5A';
+      else if (nextStadium.bg.type === 'hockey') nextStadium.bg.color = '555555';
     } else {
-      stadiumF[prop] = e.target.value;
-      setStadiumProperties(stadiumF);
+      nextStadium = { ...stadiumProperties, [prop]: e.target.value };
     }
+    setStadiumProperties(nextStadium);
+    dispatch(editStadium(nextStadium));
   }
 
   function addNewTrait() {
@@ -250,6 +257,46 @@ function PropertiesTab() {
 
   function updateStadium() {
     dispatch(editStadium(stadiumProperties))
+  }
+
+  function convertVertexSegmentToDiscJoint() {
+    let nextStadium = JSON.parse(JSON.stringify(stadiumProperties));
+
+    const discOffset = nextStadium.discs.length;
+
+    // Convert vertexes to discs
+    const newDiscs = nextStadium.vertexes.map(v => {
+      const disc = {
+        pos: [v.x, v.y],
+        radius: 1
+      };
+      if (v.trait) disc.trait = v.trait;
+      if (v.bCoef !== undefined) disc.bCoef = v.bCoef;
+      if (v.cMask) disc.cMask = v.cMask;
+      if (v.cGroup) disc.cGroup = v.cGroup;
+      if (v.color) disc.color = v.color;
+      return disc;
+    });
+
+    // Convert segments to joints
+    const newJoints = nextStadium.segments.map(s => {
+      const joint = {
+        d0: s.v0 + discOffset + 1,
+        d1: s.v1 + discOffset + 1,
+        strength: "rigid"
+      };
+      if (s.color) joint.color = s.color;
+      if (s.trait) joint.trait = s.trait;
+      return joint;
+    });
+
+    nextStadium.discs = [...nextStadium.discs, ...newDiscs];
+    nextStadium.joints = [...nextStadium.joints, ...newJoints];
+    nextStadium.vertexes = [];
+    nextStadium.segments = [];
+
+    setStadiumProperties(nextStadium);
+    dispatch(editStadium(nextStadium));
   }
 
   return (
@@ -318,8 +365,11 @@ function PropertiesTab() {
                     </div>
                     <div className="prop_group">
                       <div className="prop_group_title">Ball Physics</div>
+                      <label className="prop" style={{ width: 75 }}>disc0:</label>
+                      <input type="checkbox" id="prop_bp_disc0" className="prop" checked={stadiumProperties.ballPhysics === "disc0"} onChange={handleDisc0Toggle} style={{ width: 'auto', verticalAlign: 'middle', height: 18, marginTop: -3 }} />
+                      <br/>
                       <Properties
-                        type='text' width='75' ids='prop_bp_' valuesFrom={stadiumProperties.ballPhysics} onChange={handlePropertiesChange} onBlur={handleBlur}
+                        type='text' width='75' ids='prop_bp_' disabled={stadiumProperties.ballPhysics === "disc0"} valuesFrom={stadiumProperties.ballPhysics === "disc0" ? {} : stadiumProperties.ballPhysics} onChange={handlePropertiesChange} onBlur={handleBlur}
                         names={['gravity', 'radius', 'bCoef', 'invMass', 'damping', 'color', 'cMask', 'cGroup']} />
                     </div>
                     <div className="prop_group">
@@ -366,6 +416,12 @@ function PropertiesTab() {
                       <label className="prop" style={{ width: 75 }}>color</label>
                       <input className="prop" type="text" id="trait_color" onChange={handlePropertiesChange} onBlur={handleTraitBlur} />
                       <button id="button_newTrait" onClick={addNewTrait}>Add new trait</button>
+                    </div>
+                    <div className="prop_group">
+                      <div className="prop_group_title">Tools</div>
+                      <button onClick={convertVertexSegmentToDiscJoint} style={{ width: '100%', marginBottom: 10, height: 'auto', padding: '5px 10px' }}>
+                        Vertex&Segment to Disc&Joint
+                      </button>
                     </div>
                   </div>
                 </td></tr>

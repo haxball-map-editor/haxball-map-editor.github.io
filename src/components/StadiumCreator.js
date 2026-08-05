@@ -1,15 +1,20 @@
 /* eslint-disable eqeqeq */
+import React, { useState, useEffect } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import { editStadium } from '../reducers/stadiumSlice';
+import {
+  setOverlayImage, setOverlayVisible, setOverlayLocked,
+  setOverlayOpacity, setOverlayPosition, setOverlayScale, clearOverlay
+} from '../reducers/overlaySlice';
 import CreatorHeader from "./CreatorHeader";
+
 import $ from 'jquery';
+
 
 import {
   logoSelect, logoRotate, logoDisc, logoScale, logoSegment, logoVertex, logoGoal, logoPlane, logoProperties, logoTools, imgClear,
   imgCopy, imgDelete, imgDuplicate, imgInverse, imgMirror, imgPaste, imgPreview, imgRedo, imgSelectAll, imgSelectNone, imgUndo, basicStadiums
 } from './imports'
-
-import React, { useEffect, useState } from "react";
-import { useSelector, useDispatch } from 'react-redux';
-import { editStadium } from "../reducers/stadiumSlice";
 
 var current_tool;
 
@@ -17,10 +22,20 @@ var current_tool;
 var canvas_rect = [-150, -75, 150, 75];
 
 var zoomScale = 1;
+var cameraPos = [0, 0];
 var zoomFactor = 1.08; // zoomScale multiplier when mouse wheel is used
+var zoomMin = 0.05;
+var zoomMax = 15;
 
 var canvas = document.getElementById('canvas');
 var stadium;
+var keysPressed = {};
+window.addEventListener('blur', function() { keysPressed = {}; });
+
+var overlayState = null;
+// Bridge: set by StadiumCreator component so module-level code can dispatch overlay actions
+var _overlayDispatch = null;
+var _overlayActions = {};
 
 //===== Config Variables
 // extra border around the stadium inside the canvas
@@ -33,7 +48,47 @@ var minimum_drag_distance = 4;
 var maximum_click_distance = 5;
 
 // number of undo savepoints to keep
-var undo_levels = 500;
+var undo_levels = 100; // 500'den 100'e düşürdük - performans için
+
+// Global image cache for overlay
+var overlayImageCache = {};
+
+// Overlay render function
+function renderOverlay(ctx) {
+  if (!overlayState || !overlayState.visible || !overlayState.imageUrl) {
+    return;
+  }
+
+  ctx.save();
+
+  // Set opacity
+  ctx.globalAlpha = overlayState.opacity;
+
+  // Create image if not exists in cache
+  if (!overlayImageCache[overlayState.imageUrl]) {
+    overlayImageCache[overlayState.imageUrl] = new Image();
+    overlayImageCache[overlayState.imageUrl].src = overlayState.imageUrl;
+  }
+
+  const img = overlayImageCache[overlayState.imageUrl];
+
+  // Calculate position and size
+  const x = overlayState.position.x;
+  const y = overlayState.position.y;
+  const width = overlayState.size.width * overlayState.scale.x;
+  const height = overlayState.size.height * overlayState.scale.y;
+
+  // Draw image if loaded
+  if (img.complete && img.naturalHeight !== 0) {
+    try {
+      ctx.drawImage(img, x, y, width, height);
+    } catch (e) {
+      // Image drawing failed
+    }
+  }
+
+  ctx.restore();
+}
 
 // colors of objects that are invisible in haxball
 var colors = {
@@ -135,6 +190,12 @@ var drag_start_pos;
 var undo_savepoints = [];
 var redo_savepoints = [];
 
+// Yeni: Akıllı savepoint sistemi
+var savepoint_timer = null;
+var savepoint_delay = 500; // 500ms gecikme ile gruplama
+var last_savepoint_hash = null;
+var savepoint_group_count = 0;
+
 // Clipboard
 var clipboard;
 
@@ -206,7 +267,6 @@ function starting() {
   define_tab('joints');
   define_tab('spawnpoints');
   define_tab('basic_stadiums');
-  // define_tab('haxmaps')
 
   if (initialiseProperties) {
     initialise_properties_css();
@@ -224,27 +284,22 @@ function starting() {
 
   set_tool(tool_select);
   modified(true);
+
+  // UI'ı başlangıçta güncelle
+  setTimeout(() => {
+    updateUndoRedoButtons();
+  }, 100);
 }
-
-// function getLineCoefs(x, y) {
-//   var a = (x[1] - y[1]) / (x[0] - y[0]);
-//   var b = y[1] - a * y[0];
-//   return { a: a, b: b };
-// }
-
-// function getQuadraticEquationRoots(a, b, c) {
-//   var delta = b * b - 4 * a * c;
-//   return [(-b - Math.sqrt(delta)) / (2 * a), (-b + Math.sqrt(delta)) / (2 * a)]
-// }
 
 function renderbg(st, ctx) {
   var bg = st.bg;
+  if (!bg) return;
   ctx.save();
 
   if (bg.type == 'grass' || bg.type == 'hockey') {
 
     ctx.fillStyle = haxball[bg.type].bg_color;
-    if (bg.color) {
+    if (bg.color && typeof bg.color === 'string') {
       if (bg.color.match('^[A-Fa-f0-9]{6}$')) ctx.fillStyle = '#' + bg.color;
     }
     ctx.fillRect(-st.width, -st.height,
@@ -279,7 +334,9 @@ function renderbg(st, ctx) {
     ctx.stroke();
   } else {
     ctx.fillStyle = haxball.grass.bg_color;
-    if (bg.color.match('^[A-Fa-f0-9]{6}$')) ctx.fillStyle = '#' + bg.color;
+    if (bg.color && typeof bg.color === 'string') {
+      if (bg.color.match('^[A-Fa-f0-9]{6}$')) ctx.fillStyle = '#' + bg.color;
+    }
     ctx.fillRect(-st.width, -st.height, 2 * st.width, 2 * st.height);
   }
   ctx.restore();
@@ -418,8 +475,12 @@ function handle_down(ev) {
 
 function translate_coords(p) {
   var off = $(canvas).offset();
-  var pt = [Math.round(p[0] - off.left + canvas_rect[0]) / zoomScale,
-  Math.round(p[1] - off.top + canvas_rect[1]) / zoomScale];
+  var viewportX = p[0] - off.left;
+  var viewportY = p[1] - off.top;
+  var pt = [
+    (viewportX - canvas.width / 2) / zoomScale + cameraPos[0],
+    (viewportY - canvas.height / 2) / zoomScale + cameraPos[1]
+  ];
   return pt;
 }
 
@@ -438,36 +499,72 @@ function handle_up(ev) {
 }
 
 function handle_key(ev) {
-  if (ev.ctrlKey && ev.which == 67) {
-    alert("Keep in mind that stadium might not be copied properly using that method. Please use \"Copy All\" button");
-  }
+  var code = ev.which || ev.keyCode;
+  if (!code) return;
 
-  if (ev.ctrlKey) {
-    return;
-  } else if ($(ev.target).is('textarea')) {
-    return;
-  } else if ($(ev.target).is('input')) {
-    if (ev.which == 13) { // RET
+  // Allow inputs and textareas to handle their own shortcuts (Ctrl+C, Ctrl+V, etc.)
+  if ($(ev.target).is('textarea') || $(ev.target).is('input')) {
+    if (code == 13) { // RET
       $(document.activeElement).blur();
       return false;
     }
     return;
   }
 
-  switch (ev.which) {
+  keysPressed[code] = true;
+
+  // Ctrl kısayolları için özel işlem
+  if (ev.ctrlKey) {
+    switch (code) {
+      case 90: // Ctrl+Z - Undo
+        if (typeof quickUndo === 'function' && quickUndo()) return false;
+        break;
+      case 89: // Ctrl+Y - Redo
+        if (typeof quickRedo === 'function' && quickRedo()) return false;
+        break;
+      case 67: // Ctrl+C - Copy
+        copy();
+        return false;
+      case 86: // Ctrl+V - Paste
+        paste();
+        modified();
+        return false;
+      case 88: // Ctrl+X - Cut
+        cut();
+        modified();
+        return false;
+      case 65: // Ctrl+A - Select All
+        select_all();
+        return false;
+      case 68: // Ctrl+D - Duplicate
+        duplicate();
+        modified();
+        return false;
+      case 46: // Ctrl+Delete - Clear History
+        if (window.confirm('Tüm geçmişi temizlemek istediğinizden emin misiniz?')) {
+          if (typeof clearHistory === 'function') clearHistory();
+        }
+        return false;
+    }
+    return;
+  }
+
+  switch (code) {
+    case 87: // W
+    case 83: // S
+    case 65: // A
+    case 68: // D
+      return false;
+
     case 90: // Z
-    case 85:// U
+    case 85: // U
       undo();
       return false;
     case 82: // R
       redo();
       return false;
     case 46: // DEL
-      if (delete_selected(stadium))
-        modified();
-      return false;
-    case 65: // A
-      select_all();
+      if (delete_selected(stadium)) modified();
       return false;
     case 67: // C
       copy();
@@ -480,10 +577,6 @@ function handle_key(ev) {
       paste();
       modified();
       return false;
-    case 68: // D
-      duplicate();
-      modified();
-      return false;
     case 49: // 1
     case 50: // 2
     case 51: // 3
@@ -492,13 +585,25 @@ function handle_key(ev) {
     case 54: // 6
     case 55: // 7
     case 56: // 8
-      set_tool([tool_select, tool_rotate, tool_scale, tool_segment,
-        tool_vertex, tool_disc, tool_goal, tool_plane]
-      [ev.which - 49]);
+      var tools = [tool_select, tool_rotate, tool_scale, tool_segment,
+        tool_vertex, tool_disc, tool_goal, tool_plane];
+      var tool = tools[code - 49];
+      if (tool) set_tool(tool);
+      return false;
+    case 72: // H - History info
+      if (typeof showHistoryInfo === 'function') showHistoryInfo();
       return false;
     default:
-      return current_tool.key(ev.which, ev);
+      if (current_tool && typeof current_tool.key === 'function') {
+        return current_tool.key(code, ev);
+      }
+      return true;
   }
+}
+
+function handle_keyup(ev) {
+  var code = ev.which || ev.keyCode;
+  if (code) keysPressed[code] = false;
 }
 
 function handle_move(ev) {
@@ -512,7 +617,7 @@ function handle_move(ev) {
   }
   var update_pos = true;
   if (mouse_left_down) {
-    if (!mouse_dragging && dist(pt, drag_start_pos) >= minimum_drag_distance) {
+    if (!mouse_dragging && dist(pt, drag_start_pos) >= minimum_drag_distance / zoomScale) {
       mouse_dragging = true;
     }
     if (mouse_dragging &&
@@ -538,12 +643,36 @@ var tool_select = {
     if (ev.which === 2) return;
     var shape = under_point(stadium, pt);
     this.shape = shape;
-    if (!shape) {
+
+    // Ctrl+Click ile çoklu seçim
+    if (ev.ctrlKey && shape) {
+      this.keep_others = true;
+      if (selected(shape.object)) {
+        // Zaten seçili ise seçimi kaldır
+        this.shape_selected = true;
+        this.drag_type = 'move';
+      } else {
+        // Seçili değilse ekle
+        this.shape_selected = false;
+        this.drag_type = 'move';
+        select_shape(stadium, shape);
+      }
+    } else if (ev.shiftKey && shape) {
+      // Shift+Click ile ekleme
+      this.keep_others = true;
+      this.shape_selected = false;
+      this.drag_type = 'move';
+      if (!selected(shape.object)) {
+        select_shape(stadium, shape);
+      }
+    } else if (!shape) {
+      // Boş alana tıklama
       this.drag_type = 'select';
       if (!(ev.shiftKey || ev.ctrlKey)) {
         clear_selection(stadium);
       }
     } else {
+      // Normal tıklama
       if (shape.type == 'segments') {
         this.drag_type = 'segment';
       } else {
@@ -559,6 +688,7 @@ var tool_select = {
         this.shape_selected = true;
       }
     }
+
     queue_render();
   },
   click: function (pt, ev) {
@@ -571,6 +701,21 @@ var tool_select = {
         }
       }
     }
+
+    // Ctrl+Click ile çoklu seçim desteği
+    if (ev.ctrlKey && !this.shape) {
+      var shape = under_point(stadium, pt);
+      if (shape) {
+        if (selected(shape.object)) {
+          // Zaten seçili ise seçimi kaldır
+          unselect_shape(stadium, shape);
+        } else {
+          // Seçili değilse ekle
+          select_shape(stadium, shape);
+        }
+      }
+    }
+
     update_savepoint();
     if (total_selected_by_type.discs == 2) allowJoint();
     else disallowJoint();
@@ -698,6 +843,13 @@ function set_tool(t) {
   $('#button_tool_' + t.name).siblings('button').removeClass('active');
   $('#button_tool_' + t.name).addClass('active');
   $(canvas).css('cursor', t.cursor);
+
+  // Clear and Re-populate properties
+  if (t.name !== 'overlay') {
+    populate_tab_properties();
+    update_props(stadium);
+  }
+
   t.init();
   trigger('set_tool', t, old_tool);
   queue_render();
@@ -713,6 +865,10 @@ function unselect_shape(st, shape) {
       shape_set_selected(Shape('vertexes', st.vertexes[s.v1], s.v1), false);
   }
 
+  // Seçim sayacını güncelle
+  if (st === stadium) {
+    updateSelectionCounter();
+  }
 }
 
 function select_shape(st, shape) {
@@ -723,6 +879,11 @@ function select_shape(st, shape) {
       shape_set_selected(Shape('vertexes', st.vertexes[s.v0], s.v0), 'segment');
     if (!selected(st.vertexes[s.v1]))
       shape_set_selected(Shape('vertexes', st.vertexes[s.v1], s.v1), 'segment');
+  }
+
+  // Seçim sayacını güncelle
+  if (st === stadium) {
+    updateSelectionCounter();
   }
 }
 
@@ -743,6 +904,12 @@ function clear_selection(st) {
       count++;
     }
   });
+
+  // Seçim sayacını güncelle
+  if (st === stadium) {
+    updateSelectionCounter();
+  }
+
   return count;
 }
 
@@ -756,7 +923,7 @@ function under_point(st, pt, type) {
   if (!type || type == 'discs') {
     eachRev(st.discs, function (i, disc) {
       var d = complete_shape_object(st, Shape('discs', disc, i));
-      if (dist(d.pos, pt) - d.radius <= maximum_click_distance) {
+      if (dist(d.pos, pt) - d.radius <= maximum_click_distance / zoomScale) {
         obj = disc;
         index = i;
         return false;
@@ -769,7 +936,7 @@ function under_point(st, pt, type) {
   if (!type || type == 'goals') {
     eachRev(st.goals, function (i, goal) {
       var g = complete(st, goal);
-      if (point_next_to_line(pt, g.p0, g.p1, maximum_click_distance)) {
+      if (point_next_to_line(pt, g.p0, g.p1, maximum_click_distance / zoomScale)) {
         obj = goal;
         index = i;
         return false;
@@ -782,7 +949,7 @@ function under_point(st, pt, type) {
   if (!type || type == 'vertexes') {
     eachRev(st.vertexes, function (i, vertex) {
       var v = complete(st, vertex);
-      if (dist([v.x, v.y], pt) <= maximum_click_distance) {
+      if (dist([v.x, v.y], pt) <= maximum_click_distance / zoomScale) {
         obj = vertex;
         index = i;
         return false;
@@ -794,7 +961,7 @@ function under_point(st, pt, type) {
 
   if (!type || type == 'segment') {
     eachRev(st.segments, function (i, segment) {
-      if (segment_contains(st, segment, pt, maximum_click_distance)) {
+      if (segment_contains(st, segment, pt, maximum_click_distance / zoomScale)) {
         obj = segment;
         index = i;
         return false;
@@ -807,7 +974,7 @@ function under_point(st, pt, type) {
   if (!type || type == 'joints') {
     if (st.joints) {
       eachRev(st.joints, function (i, joint) {
-        if (joint_contains(st, joint, pt, maximum_click_distance)) {
+        if (joint_contains(st, joint, pt, maximum_click_distance / zoomScale)) {
           obj = joint;
           index = i;
           return false;
@@ -821,7 +988,7 @@ function under_point(st, pt, type) {
   if (!type || type == 'planes') {
     eachRev(st.planes, function (i, plane) {
       var ext = plane_extremes(st, plane);
-      if (point_next_to_line(pt, ext.a, ext.b, maximum_click_distance)) {
+      if (point_next_to_line(pt, ext.a, ext.b, maximum_click_distance / zoomScale)) {
         obj = plane;
         index = i;
         return false;
@@ -853,9 +1020,16 @@ function trigger(name, a, b) {
   $.each(triggers[name], function (i, f) { f(a, b); });
 }
 
+var _renderQueued = false;
 function queue_render() {
-  // if this function gets called too much, add a minimum delay between calls to render
-  renderStadium(stadium);
+  if (_renderQueued) return;
+  _renderQueued = true;
+  requestAnimationFrame(function () {
+    _renderQueued = false;
+    if (stadium && stadium.bg) {
+      renderStadium(stadium);
+    }
+  });
 }
 
 function for_selected(st, f, a, b, c) {
@@ -936,6 +1110,11 @@ function select_rect(st, a, b) {
     }
 
   });
+
+  // Seçim sayacını güncelle
+  if (st === stadium) {
+    updateSelectionCounter();
+  }
 
   // TODO: count is wrong. includes shapes that were already selected
   return count;
@@ -1522,58 +1701,219 @@ function update_savepoint() {
   queue_render();
 }
 
+// Yeni: Akıllı savepoint sistemi
 function savepoint() {
-  undo_savepoints.unshift(JSON.parse(JSON.stringify(stadium)))
-  undo_savepoints.splice(undo_levels);
-  redo_savepoints = [];
+  // Akıllı savepoint: aynı durum tekrar kaydedilmesin
+  var current_hash = JSON.stringify(stadium);
+  if (current_hash === last_savepoint_hash) {
+    return;
+  }
+
+  // Timer ile gruplama: hızlı ardışık değişiklikleri grupla
+  if (savepoint_timer) {
+    clearTimeout(savepoint_timer);
+  }
+
+  savepoint_timer = setTimeout(function () {
+    undo_savepoints.unshift(JSON.parse(JSON.stringify(stadium)));
+    undo_savepoints.splice(undo_levels);
+    redo_savepoints = [];
+    last_savepoint_hash = JSON.stringify(stadium);
+    savepoint_group_count++;
+
+    // UI güncelleme
+    updateUndoRedoButtons();
+
+    // Console'da bilgi
+    console.log(`Savepoint oluşturuldu (${undo_savepoints.length}/${undo_levels})`);
+  }, savepoint_delay);
+}
+
+// Yeni: Undo/Redo butonlarını güncelle
+function updateUndoRedoButtons() {
+  var undoBtn = document.getElementById('button_undo');
+  var redoBtn = document.getElementById('button_redo');
+
+  if (undoBtn) {
+    undoBtn.disabled = undo_savepoints.length <= 1;
+    undoBtn.title = `Undo (${undo_savepoints.length - 1} adım)`;
+
+    // Görsel geri bildirim
+    if (undo_savepoints.length > 1) {
+      undoBtn.style.opacity = '1';
+      undoBtn.style.cursor = 'pointer';
+    } else {
+      undoBtn.style.opacity = '0.5';
+      undoBtn.style.cursor = 'not-allowed';
+    }
+  }
+
+  if (redoBtn) {
+    redoBtn.disabled = redo_savepoints.length <= 0;
+    redoBtn.title = `Redo (${redo_savepoints.length} adım)`;
+
+    // Görsel geri bildirim
+    if (redo_savepoints.length > 0) {
+      redoBtn.style.opacity = '1';
+      redoBtn.style.cursor = 'pointer';
+    } else {
+      redoBtn.style.opacity = '0.5';
+      redoBtn.style.cursor = 'not-allowed';
+    }
+  }
 }
 
 function undo() {
   if (undo_savepoints.length <= 1)
     return false;
+
+  // Görsel geri bildirim
+  var undoBtn = document.getElementById('button_undo');
+  if (undoBtn) {
+    undoBtn.style.backgroundColor = '#4CAF50';
+    setTimeout(() => {
+      undoBtn.style.backgroundColor = '#5872A5';
+    }, 200);
+  }
+
   redo_savepoints.unshift(undo_savepoints.shift());
   redo_savepoints.splice(undo_levels);
   load(undo_savepoints[0]);
   initialiseProperties = false;
   modified(true);
+
+  // UI güncelleme
+  updateUndoRedoButtons();
+
+  // Console'da bilgi
+  console.log(`Undo yapıldı. Kalan: ${undo_savepoints.length - 1}, Redo: ${redo_savepoints.length}`);
+
   return true;
 }
 
 function redo() {
   if (redo_savepoints.length <= 0)
     return false;
+
+  // Görsel geri bildirim
+  var redoBtn = document.getElementById('button_redo');
+  if (redoBtn) {
+    redoBtn.style.backgroundColor = '#4CAF50';
+    setTimeout(() => {
+      redoBtn.style.backgroundColor = '#5872A5';
+    }, 200);
+  }
+
   var state1 = redo_savepoints.shift();
   undo_savepoints.unshift(state1);
   undo_savepoints.splice(undo_levels);
   load(state1);
   initialiseProperties = false;
   modified(true);
+
+  // UI güncelleme
+  updateUndoRedoButtons();
+
+  // Console'da bilgi
+  console.log(`Redo yapıldı. Kalan: ${undo_savepoints.length - 1}, Redo: ${redo_savepoints.length}`);
+
   return true;
 }
 
-function delete_selected(st) {
-  for (var i = 0; i < st.discs.length; i++) {
-    var a = st.discs[i];
-    if (a._selected) {
-      for (var j = 0; j < stadium.joints.length; j++) {
-        var b = stadium.joints[j];
-        if (b.d0 - 1 == i || b.d1 - 1 == i) {
-          stadium.joints[j] = "kasuj";
-          continue;
-        }
-        console.log(i, a, j, b);
-        if (b.d0 - 1 > i) stadium.joints[j].d0--;
-        if (b.d1 - 1 > i) stadium.joints[j].d1--;
-      }
-      for (var j = 0; j < stadium.joints.length; j++) {
-        if (stadium.joints[j] == "kasuj") stadium.joints.splice(j, 1);
-      }
+// Yeni: Hızlı undo/redo (Ctrl+Z, Ctrl+Y)
+function quickUndo() {
+  if (undo_savepoints.length > 1) {
+    undo();
+    return true;
+  }
+  return false;
+}
+
+function quickRedo() {
+  if (redo_savepoints.length > 0) {
+    redo();
+    return true;
+  }
+  return false;
+}
+
+// Yeni: Tüm geçmişi temizle
+function clearHistory() {
+  undo_savepoints = [undo_savepoints[0]]; // Sadece mevcut durumu tut
+  redo_savepoints = [];
+  updateUndoRedoButtons();
+  console.log('Geçmiş temizlendi');
+}
+
+// Yeni: Seçim sayacını güncelle
+function updateSelectionCounter() {
+  var total = 0;
+  var byType = {};
+
+  for_all_shapes(stadium, function (shape) {
+    if (selected(shape.object)) {
+      total++;
+      if (!byType[shape.type]) byType[shape.type] = 0;
+      byType[shape.type]++;
     }
+  });
+
+  // Mouse position alanında seçim bilgisini göster
+  var mousepos = document.getElementById('mousepos');
+  if (mousepos && total > 0) {
+    var typeInfo = Object.keys(byType).map(type => `${type}: ${byType[type]}`).join(', ');
+    mousepos.title = `Seçili: ${total} obje (${typeInfo})`;
+  }
+
+  return { total, byType };
+}
+
+// Yeni: Geçmiş bilgilerini göster
+function showHistoryInfo() {
+  var info = `📚 Geçmiş Bilgileri:
+  
+🔄 Undo: ${undo_savepoints.length - 1} adım mevcut
+⏭️ Redo: ${redo_savepoints.length} adım mevcut
+💾 Maksimum: ${undo_levels} savepoint
+⏱️ Gruplama: ${savepoint_delay}ms
+📊 Toplam: ${savepoint_group_count} savepoint oluşturuldu
+
+⌨️ Kısayollar:
+• Ctrl+Z: Undo
+• Ctrl+Y: Redo  
+• Ctrl+Delete: Geçmişi temizle
+• H: Bu bilgi paneli
+
+🖱️ Çoklu Seçim:
+• Ctrl+Click: Obje ekle/çıkar
+• Shift+Click: Obje ekle
+• Drag: Çoklu seçim kutusu`;
+
+  window.alert(info);
+}
+
+function delete_selected(st) {
+  var deletedDiscIndices = [];
+  $.each(st.discs, function (i, disc) {
+    if (disc._selected) deletedDiscIndices.push(i);
+  });
+
+  if (deletedDiscIndices.length > 0 && st.joints) {
+    st.joints = st.joints.filter(function (joint) {
+      return !deletedDiscIndices.includes(joint.d0 - 1) && !deletedDiscIndices.includes(joint.d1 - 1);
+    });
+
+    $.each(st.joints, function (j, joint) {
+      var d0_shift = deletedDiscIndices.filter(idx => idx < joint.d0 - 1).length;
+      var d1_shift = deletedDiscIndices.filter(idx => idx < joint.d1 - 1).length;
+      joint.d0 -= d0_shift;
+      joint.d1 -= d1_shift;
+    });
   }
   var vertex_del_log = [];
   var count = 0;
   // delete segments BEFORE vertices
-  $.each(['segments', 'vertexes', 'goals', 'discs', 'planes'], function (i, name) {
+  $.each(['segments', 'vertexes', 'goals', 'discs', 'planes', 'joints'], function (i, name) {
     var group = st[name];
     if (group) {
       st[name] = $.grep(group, function (obj, i) {
@@ -1912,76 +2252,154 @@ function sign(n) {
   return n < 0 ? -1 : 1;
 }
 
-function resize_canvas() {
-  // TODO: use scrollLeft and scrollTop to recenter the view
-  var st = stadium;
-  var rect;
-
-  rect = [-st.width, -st.height, st.width, st.height];
-
-  var consider = function (pt, r) {
-    var x = pt[0];
-    var y = pt[1];
-    if (x - r < rect[0]) rect[0] = x - r;
-    if (y - r < rect[1]) rect[1] = y - r;
-    if (x + r > rect[2]) rect[2] = x + r;
-    if (y + r > rect[3]) rect[3] = y + r;
-  };
-
-  for_all_shapes(stadium, function (shape) {
-    var obj = shape.object;
-    var o = complete(st, obj);
-    switch (shape.type) {
-      case 'vertexes':
-        consider([o.x, o.y], 0);
-        break;
-      case 'goals':
-        consider(o.p0, 0);
-        consider(o.p1, 0);
-        break;
-      case 'discs':
-        consider(o.pos, o.radius);
-        break;
-      case 'planes':
-        // TODO: find a better way to ensure that a plane is reachable
-        var ext = plane_extremes(st, obj);
-        consider(midpoint(ext.a, ext.b), 0);
-        break;
-      default:
-      // console.log('default case');
-    }
-  });
-
-  var cd = $('#canvas_div');
-  var canvas_div_size = [cd.innerWidth() - 20, cd.innerHeight() - 20];
-
-  var rectBeforeZoom = [
-    round(min(rect[0] - margin, -canvas_div_size[0] / 2)),
-    round(min(rect[1] - margin, -canvas_div_size[1] / 2)),
-    round(max(rect[2] + margin, canvas_div_size[0] / 2)),
-    round(max(rect[3] + margin, canvas_div_size[1] / 2))
-  ];
-
-  rect = rectBeforeZoom.map(el => el * zoomScale)
-
-  if (rect[2] - rect[0] >= 65500 || rect[3] - rect[1] >= 65500) {
-    alert("Map is too big, it will be displayed in a limited way (8000x8000). Limits: height:65535, width:65535");
-    rect = [-4000, -4000, 4000, 4000];
-    canvas_rect = rect;
-    var wh = { width: rect[2] - rect[0], height: rect[3] - rect[1] };
-    $(canvas).attr(wh);
-    $(canvas).css(wh);
-
-    queue_render();
-    return;
+// Core resize logic - updates canvas_rect and canvas element size
+// skipRender: if true, does not call queue_render (used by handleWheel to avoid double-render)
+function resize_canvas_core(skipRender) {
+  if (!canvas) {
+    canvas = document.getElementById('canvas');
   }
-  canvas_rect = rect;
-  var wh = { width: rect[2] - rect[0], height: rect[3] - rect[1] };
+  var cd = $('#canvas_div');
+  var wh = { width: cd.innerWidth() - 20, height: cd.innerHeight() - 20 };
+  
   $(canvas).attr(wh);
   $(canvas).css(wh);
+  
+  canvas_rect = [0, 0, wh.width, wh.height];
 
-  queue_render();
+  if (!skipRender) {
+    queue_render();
+  }
 }
+
+function resize_canvas() {
+  resize_canvas_core(false);
+}
+
+var tool_overlay = {
+  name: 'overlay',
+  cursor: 'default',
+  init: function () {
+    var tp = $('#tab_properties');
+    tp.empty();
+
+    var ov = overlayState || {};
+
+    // --- file input (hidden) ---
+    var fileInput = $('<input type="file" accept="image/*" style="display:none" id="overlay_file_input">');
+    fileInput.on('change', function (e) {
+      var file = e.target.files[0];
+      if (!file || !file.type.startsWith('image/')) return;
+      var reader = new FileReader();
+      reader.onload = function (ev) {
+        var img = new Image();
+        img.onload = function () {
+          if (_overlayDispatch && _overlayActions.setOverlayImage) {
+            _overlayDispatch(_overlayActions.setOverlayImage({
+              imageUrl: ev.target.result,
+              size: { width: img.width, height: img.height }
+            }));
+          }
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+    tp.append(fileInput);
+
+    function makeRow(label, control) {
+      var row = $('<div class="property" style="display:flex;align-items:center;margin-bottom:4px;"></div>');
+      row.append($('<label class="prop" style="width:80px;flex-shrink:0;">' + label + '</label>'));
+      row.append(control);
+      return row;
+    }
+
+    // --- Upload / Clear buttons ---
+    var btnRow = $('<div style="margin-bottom:6px;"></div>');
+    var btnUpload = $('<button style="margin-right:4px;">' + (ov.imageUrl ? 'Change Image' : 'Upload Image') + '</button>');
+    btnUpload.on('click', function () { $('#overlay_file_input')[0].click(); });
+    btnRow.append(btnUpload);
+    if (ov.imageUrl) {
+      var btnClear = $('<button style="background:#dc3545;color:#fff;border:none;">Clear</button>');
+      btnClear.on('click', function () {
+        if (_overlayDispatch && _overlayActions.clearOverlay) {
+          _overlayDispatch(_overlayActions.clearOverlay());
+        }
+        set_tool(tool_overlay); // re-init to refresh UI
+      });
+      btnRow.append(btnClear);
+    }
+    tp.append(btnRow);
+
+    if (ov.imageUrl) {
+      // --- Visible ---
+      var chkVis = $('<input type="checkbox"' + (ov.visible ? ' checked' : '') + '>');
+      chkVis.on('change', function () {
+        if (_overlayDispatch && _overlayActions.setOverlayVisible)
+          _overlayDispatch(_overlayActions.setOverlayVisible(this.checked));
+      });
+      tp.append(makeRow('Visible:', chkVis));
+
+      // --- Locked ---
+      var chkLock = $('<input type="checkbox"' + (ov.locked ? ' checked' : '') + '>');
+      chkLock.on('change', function () {
+        if (_overlayDispatch && _overlayActions.setOverlayLocked)
+          _overlayDispatch(_overlayActions.setOverlayLocked(this.checked));
+      });
+      tp.append(makeRow('Locked:', chkLock));
+
+      // --- Opacity ---
+      var opacityRow = $('<div class="property" style="margin-bottom:4px;"></div>');
+      var opLabel = $('<label class="prop" style="width:80px;flex-shrink:0;">Opacity:</label>');
+      var opSlider = $('<input type="range" min="0" max="1" step="0.05" value="' + (ov.opacity || 0.5) + '" style="width:90px;">');
+      var opVal = $('<span style="color:#ccc;margin-left:5px;width:35px;display:inline-block;">' + Math.round((ov.opacity || 0.5) * 100) + '%</span>');
+      opSlider.on('input', function () {
+        var v = parseFloat(this.value);
+        opVal.text(Math.round(v * 100) + '%');
+        if (_overlayDispatch && _overlayActions.setOverlayOpacity)
+          _overlayDispatch(_overlayActions.setOverlayOpacity(v));
+      });
+      opacityRow.append(opLabel).append(opSlider).append(opVal);
+      tp.append(opacityRow);
+
+      // --- Position X ---
+      var inpX = $('<input type="number" step="5" class="prop" value="' + ((ov.position && ov.position.x) || 0) + '">');
+      inpX.on('change', function () {
+        if (_overlayDispatch && _overlayActions.setOverlayPosition)
+          _overlayDispatch(_overlayActions.setOverlayPosition({ ...overlayState.position, x: parseFloat(this.value) || 0 }));
+      });
+      tp.append(makeRow('Pos X:', inpX));
+
+      // --- Position Y ---
+      var inpY = $('<input type="number" step="5" class="prop" value="' + ((ov.position && ov.position.y) || 0) + '">');
+      inpY.on('change', function () {
+        if (_overlayDispatch && _overlayActions.setOverlayPosition)
+          _overlayDispatch(_overlayActions.setOverlayPosition({ ...overlayState.position, y: parseFloat(this.value) || 0 }));
+      });
+      tp.append(makeRow('Pos Y:', inpY));
+
+      // --- Scale W ---
+      var inpSW = $('<input type="number" step="0.1" class="prop" value="' + ((ov.scale && ov.scale.x) || 1) + '">');
+      inpSW.on('change', function () {
+        if (_overlayDispatch && _overlayActions.setOverlayScale)
+          _overlayDispatch(_overlayActions.setOverlayScale({ ...overlayState.scale, x: parseFloat(this.value) || 1 }));
+      });
+      tp.append(makeRow('Scale W:', inpSW));
+
+      // --- Scale H ---
+      var inpSH = $('<input type="number" step="0.1" class="prop" value="' + ((ov.scale && ov.scale.y) || 1) + '">');
+      inpSH.on('change', function () {
+        if (_overlayDispatch && _overlayActions.setOverlayScale)
+          _overlayDispatch(_overlayActions.setOverlayScale({ ...overlayState.scale, y: parseFloat(this.value) || 1 }));
+      });
+      tp.append(makeRow('Scale H:', inpSH));
+    }
+    queue_render();
+  },
+  shutdown: function () {
+    $('#tab_properties').empty();
+    queue_render();
+  }
+};
 
 var tool_scale = {
   name: 'scale',
@@ -2192,6 +2610,7 @@ function initialise_properties_css() {
 
 function populate_tab_properties() {
   var tp = $('#tab_properties');
+  tp.empty();
   $.each(properties, function (prop, opts) {
     var type = opts.type;
     if (type != 'ref') {
@@ -2205,6 +2624,12 @@ function populate_tab_properties() {
         // TODO: number point color team trait bool
 
         case 'point':
+          var inpX = $('<input type="text" class="prop prop-x" placeholder="X">').appendTo(div);
+          var inpY = $('<input type="text" class="prop prop-y" placeholder="Y">').appendTo(div);
+          property_data[prop] = { x: inpX, y: inpY };
+          inpX.on('input', apply);
+          inpY.on('input', apply);
+          break;
         case 'number':
         case 'color':
         case 'team':
@@ -2227,7 +2652,15 @@ function property_apply(prop, inp) {
   var val = get_prop_val(prop);
   if (val !== undefined) {
     for_selected(stadium, function (st, shape) {
-      shape.object[prop] = val;
+      if (properties[prop].type === 'point' && Array.isArray(val)) {
+        var current = shape.object[prop] || [0, 0];
+        shape.object[prop] = [
+          val[0] !== null ? val[0] : current[0],
+          val[1] !== null ? val[1] : current[1]
+        ];
+      } else {
+        shape.object[prop] = val;
+      }
       // TODO: mirror the property update
     });
     modified();
@@ -2239,13 +2672,24 @@ function get_prop_val(prop, def) {
   if (!inp)
     return def;
   var type = properties[prop].type;
-  var val = inp.val();
+  var val = (inp && typeof inp.val === 'function') ? inp.val() : null;
   switch (type) {
     case 'point':
-      var m = val.match(/^(-?[0-9]+(\.[0-9]+)?)[,;] ?(-?[0-9]+(\.[0-9]+)?)$/);
-      if (m) return [parseFloat(m[1]), parseFloat(m[3])];
+      if (inp && inp.x && inp.y) {
+        var xValStr = inp.x.val();
+        var yValStr = inp.y.val();
+        var xVal = (xValStr === '' || isNaN(xValStr)) ? null : parseFloat(xValStr);
+        var yVal = (yValStr === '' || isNaN(yValStr)) ? null : parseFloat(yValStr);
+        if (xVal !== null || yVal !== null) {
+          return [xVal, yVal];
+        }
+      } else if (val !== null) {
+        var m = val.match(/^(-?[0-9]+(\.[0-9]+)?)[,;] ?(-?[0-9]+(\.[0-9]+)?)$/);
+        if (m) return [parseFloat(m[1]), parseFloat(m[3])];
+      }
       break;
     case 'number':
+      if (prop == 'strength' && val == 'rigid') return 'rigid';
       var m = val.match(/^(-?[0-9]+(\.[0-9]+)?)$/);
       if (m) return parseFloat(m[1]);
       break;
@@ -2265,7 +2709,7 @@ function get_prop_val(prop, def) {
       var layers = val.split(/[,; ]+/);
       var good = true;
       $.each(layers, function (i, layer) {
-        if ($.inArray(layer, ['ball', 'red', 'blue', 'wall', 'redKO', 'blueKO', 'all', 'kick', 'score', 'c0', 'c1', 'c2', 'c3']) == -1)
+        if ($.inArray(layer, ['ball', 'red', 'blue', 'wall', 'redKO', 'blueKO', 'all', 'kick', 'score', 'c0', 'c1', 'c2', 'c3', 'none']) == -1)
           good = false;
       });
       if (good) return layers;
@@ -2282,7 +2726,14 @@ function get_prop_val(prop, def) {
     default:
       console.warn('Unexpected type')
   }
-  if (val !== '') {
+  if (inp && inp.x && inp.y) {
+    if (inp.x.val() !== '') {
+      inp.x.addClass('error');
+    }
+    if (inp.y.val() !== '') {
+      inp.y.addClass('error');
+    }
+  } else if (val !== '' && val !== null) {
     inp.addClass('error');
   }
   return def;
@@ -2293,17 +2744,41 @@ function set_prop_val(prop, val) {
   if (!inp)
     return;
 
-  inp.removeClass('error');
+  if (inp.x && inp.y) {
+    inp.x.removeClass('error');
+    inp.y.removeClass('error');
+  } else if (typeof inp.removeClass === 'function') {
+    inp.removeClass('error');
+  }
 
   if (val === undefined) {
-    inp.val('');
+    if (inp.x && inp.y) {
+      inp.x.val('');
+      inp.y.val('');
+    } else if (typeof inp.val === 'function') {
+      inp.val('');
+    }
     return;
   }
 
   var type = properties[prop].type;
   switch (type) {
     case 'point':
-      inp.val(val[0] + ',' + val[1]);
+      if (inp.x && inp.y) {
+        // Individual component handling
+        if (val === undefined) {
+          inp.x.val('');
+          inp.y.val('');
+        } else {
+          var newValX = (val[0] !== undefined && val[0] !== null) ? '' + val[0] : '';
+          var newValY = (val[1] !== undefined && val[1] !== null) ? '' + val[1] : '';
+          if (inp.x.val() !== newValX) inp.x.val(newValX);
+          if (inp.y.val() !== newValY) inp.y.val(newValY);
+        }
+      } else {
+        var newVal = (val !== undefined && val != null) ? val[0] + ',' + val[1] : '';
+        if (inp.val() !== newVal) inp.val(newVal);
+      }
       break;
     case 'number':
     case 'team':
@@ -2352,8 +2827,12 @@ function get_props_for_type(type) {
     var opts = properties[prop];
     if (opts.def) {
       var val = get_prop_val(prop);
-      if (val !== undefined)
+      if (val !== undefined) {
+        if (opts.type === 'point' && Array.isArray(val)) {
+          val = [val[0] === null ? 0 : val[0], val[1] === null ? 0 : val[1]];
+        }
         props[prop] = val;
+      }
     }
   });
   return props;
@@ -2377,8 +2856,17 @@ function add_props_from_shape(shape) {
     var val = obj[prop];
     if (n === 0) {
       set_prop_val(prop, val);
-    } else if (!equal(val, get_prop_val(prop))) {
-      set_prop_val(prop, undefined);
+    } else {
+      var current_ui = get_prop_val(prop);
+      if (properties[prop].type === 'point' && Array.isArray(val) && Array.isArray(current_ui)) {
+        var combined = [
+          equal(val[0], current_ui[0]) ? val[0] : undefined,
+          equal(val[1], current_ui[1]) ? val[1] : undefined
+        ];
+        set_prop_val(prop, combined);
+      } else if (!equal(val, current_ui)) {
+        set_prop_val(prop, undefined);
+      }
     }
   });
 }
@@ -2449,9 +2937,22 @@ function rgb_to_hex(rgb) {
 
 function copy() {
   clipboard = clone_selected(stadium);
+  try {
+    localStorage.setItem('haxball_editor_clipboard', JSON.stringify(clipboard));
+  } catch (e) {
+    console.error("Failed to save to localStorage clipboard:", e);
+  }
 }
 
 function paste() {
+  try {
+    const saved = localStorage.getItem('haxball_editor_clipboard');
+    if (saved) {
+      clipboard = JSON.parse(saved);
+    }
+  } catch (e) {
+    console.error("Failed to load from localStorage clipboard:", e);
+  }
   import_snippet(stadium, clipboard);
 }
 
@@ -2465,25 +2966,53 @@ function duplicate() {
 }
 
 function clone_selected(st) {
-  // TODO: also clone traits, and on pasting if traits don't exist, create them with cloned properties
   var snip = {
     shapes: []
   };
+  var added = {
+    vertexes: {},
+    segments: {},
+    goals: {},
+    discs: {},
+    planes: {},
+    joints: {}
+  };
+
+  function add_to_snip(type, obj, index) {
+    if (added[type][index]) return;
+    added[type][index] = true;
+    snip.shapes.push(Shape(type, object_clone(obj), index));
+  }
+
+  // Collect all selected shapes (except joints, handled later)
   for_all_shapes(st, function (shape) {
     if (selected(shape.object)) {
-      snip.shapes.push(shape_clone(shape));
-      if (shape.type == 'segments') {
-        var a = st.vertexes[shape.object.v0];
-        if (!selected(a)) {
-          snip.shapes.push(shape_clone(Shape('vertexes', a, shape.object.v0)));
-        }
-        var b = st.vertexes[shape.object.v1];
-        if (!selected(b)) {
-          snip.shapes.push(shape_clone(Shape('vertexes', b, shape.object.v1)));
-        }
+      if (shape.type === 'segments') {
+        add_to_snip('segments', shape.object, shape.index);
+        // Also clone connected vertexes
+        var v0 = shape.object.v0;
+        var v1 = shape.object.v1;
+        add_to_snip('vertexes', st.vertexes[v0], v0);
+        add_to_snip('vertexes', st.vertexes[v1], v1);
+      } else if (shape.type !== 'joints') {
+        add_to_snip(shape.type, shape.object, shape.index);
       }
     }
   });
+
+  // Now add joints that connect selected discs or are directly selected
+  if (st.joints) {
+    $.each(st.joints, function (i, joint) {
+      var disc0 = st.discs[joint.d0 - 1];
+      var disc1 = st.discs[joint.d1 - 1];
+
+      // Clone joint if it's selected OR if both connected discs are selected
+      if (selected(joint) || (disc0 && disc1 && selected(disc0) && selected(disc1))) {
+        add_to_snip('joints', joint, i);
+      }
+    });
+  }
+
   return snip;
 }
 
@@ -2493,7 +3022,12 @@ function import_snippet(st, snip) {
   clear_selection(st);
   var svl = st.vertexes.length;
   var newi = {};
+  var newDiscIndices = {};
+
+  // First pass: create all shapes and store disc index mappings
   $.each(snip.shapes, function (i, shape) {
+    if (shape.type == 'joints') return; // Skip joints in first pass
+
     var index = st[shape.type].length;
     var copy = $.extend(true, {}, shape.object);
     if (shape.type == 'vertexes') {
@@ -2512,9 +3046,51 @@ function import_snippet(st, snip) {
       if (!(v1 in newi))
         newi[v1] = svl++;
       copy.v1 = newi[v1];
+    } else if (shape.type == 'discs') {
+      // Store the mapping of old disc index to new disc index
+      newDiscIndices[shape.index] = index;
     }
     st[shape.type][index] = copy;
     shape_set_selected(Shape(shape.type, st[shape.type][index], index), true);
+  });
+
+  // Second pass: handle joints with updated disc indices
+  $.each(snip.shapes, function (i, shape) {
+    if (shape.type == 'joints') {
+      var index = st[shape.type].length;
+      var copy = $.extend(true, {}, shape.object);
+
+      // Find the new disc indices for the discs this joint connects
+      var oldD0 = copy.d0 - 1; // Convert to 0-based index
+      var oldD1 = copy.d1 - 1; // Convert to 0-based index
+
+      // Find the corresponding new disc indices
+      var newD0 = -1;
+      var newD1 = -1;
+
+      // Search through the original shapes to find the discs this joint was connected to
+      $.each(snip.shapes, function (j, originalShape) {
+        if (originalShape.type === 'discs') {
+          if (originalShape.index === oldD0) {
+            newD0 = newDiscIndices[originalShape.index];
+          }
+          if (originalShape.index === oldD1) {
+            newD1 = newDiscIndices[originalShape.index];
+          }
+        }
+      });
+
+      // Only create joint if both discs were duplicated (i.e., both have new indices)
+      if (newD0 !== -1 && newD1 !== -1) {
+        // Update joint references to new disc indices
+        copy.d0 = newD0 + 1; // Convert back to 1-based index
+        copy.d1 = newD1 + 1; // Convert back to 1-based index
+
+        st[shape.type][index] = copy;
+        shape_set_selected(Shape(shape.type, st[shape.type][index], index), true);
+      }
+      // If either disc wasn't duplicated, don't create the joint
+    }
   });
 }
 
@@ -2828,6 +3404,20 @@ function renderStadium(st) {
 
   var transform;
   canvas = document.getElementById('canvas');
+  if (!canvas) return;
+
+  var ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  // Refresh canvas_rect to reflect current viewport in world coords
+  var zoomW = canvas.width / zoomScale;
+  var zoomH = canvas.height / zoomScale;
+  canvas_rect = [
+    cameraPos[0] - zoomW / 2,
+    cameraPos[1] - zoomH / 2,
+    cameraPos[0] + zoomW / 2,
+    cameraPos[1] + zoomH / 2
+  ];
 
   if (current_tool && current_tool.transform) {
     transform = function (shape, draw) {
@@ -2839,22 +3429,20 @@ function renderStadium(st) {
     transform = function (shape, draw) { draw(); };
   }
 
-  var ctx = canvas.getContext('2d');
-
   try {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   } catch (error) {
-    alert('You can\'t zoom in any more');
+    console.warn('Zoom limit reached');
     zoomScale /= zoomFactor;
-    resize_canvas()
+    resize_canvas();
     return;
   }
 
-  ctx.clearRect(0, 0, canvas_rect[2] - canvas_rect[0], canvas_rect[3] - canvas_rect[1]);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  ctx.translate(-canvas_rect[0], -canvas_rect[1]);
-
+  ctx.translate(canvas.width / 2, canvas.height / 2);
   ctx.scale(zoomScale, zoomScale);
+  ctx.translate(-cameraPos[0], -cameraPos[1]);
 
   if (settings.preview) {
     ctx.beginPath();
@@ -2866,6 +3454,9 @@ function renderStadium(st) {
   }
 
   renderbg(st, ctx);
+
+  // Render overlay/template image
+  renderOverlay(ctx);
 
   if (!settings.preview) $.each(st.planes, function (i, plane) {
     transform(Shape('planes', plane, i), function () {
@@ -2925,9 +3516,13 @@ function renderStadium(st) {
   $.each(st.joints, function (i, joint) {
     transform(Shape('joints', joint, i), function () {
       joint = complete(st, joint);
+      var d0 = stadium.discs[joint.d0 - 1];
+      var d1 = stadium.discs[joint.d1 - 1];
+      if (!d0 || !d1 || !d0.pos || !d1.pos) return;
+
       ctx.beginPath();
-      ctx.moveTo(stadium.discs[joint.d0 - 1].pos[0], stadium.discs[joint.d0 - 1].pos[1]);
-      ctx.lineTo(stadium.discs[joint.d1 - 1].pos[0], stadium.discs[joint.d1 - 1].pos[1]);
+      ctx.moveTo(d0.pos[0], d0.pos[1]);
+      ctx.lineTo(d1.pos[0], d1.pos[1]);
       if (selected(joint)) {
         ctx.lineWidth = 4;
         ctx.strokeStyle = colors.selected;
@@ -2986,49 +3581,32 @@ function renderStadium(st) {
     ctx.fill();
     ctx.stroke();
 
-    if (st.redSpawnPoints && st.redSpawnPoints.length > 0) {
-      for (var i = 0; i < st.redSpawnPoints.length; i++) {
+    var renderSpawnPoints = function (spawnPoints, color, defaultPos) {
+      if (spawnPoints && spawnPoints.length > 0) {
+        for (var i = 0; i < spawnPoints.length; i++) {
+          ctx.beginPath();
+          ctx.arc(spawnPoints[i][0], spawnPoints[i][1], 15, 0, Math.PI * 2, true);
+          ctx.fillStyle = color;
+          ctx.lineWidth = 2.5;
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = 'white';
+          ctx.font = 'bold 15px Arial';
+          var odl = (i + 1).toString().length > 1 ? 7.5 : 3.75;
+          ctx.fillText('' + (i + 1), spawnPoints[i][0] - odl, spawnPoints[i][1] + 3.75);
+        }
+      } else {
         ctx.beginPath();
-        ctx.arc(st.redSpawnPoints[i][0], st.redSpawnPoints[i][1], 15, 0, Math.PI * 2, true);
-        ctx.fillStyle = 'rgb(229,110,86)';
+        ctx.arc(defaultPos, 0, 15, 0, Math.PI * 2, true);
+        ctx.fillStyle = color;
         ctx.lineWidth = 2.5;
         ctx.fill();
         ctx.stroke();
-        ctx.fillStyle = 'white';
-        ctx.font = 'bold 15px Arial';
-        var odl = (i + 1).toString().length > 1 ? 7.5 : 3.75
-        ctx.fillText('' + (i + 1), st.redSpawnPoints[i][0] - odl, st.redSpawnPoints[i][1] + 3.75)
       }
-    } else {
-      ctx.beginPath();
-      ctx.arc(-st.spawnDistance, 0, 15, 0, Math.PI * 2, true);
-      ctx.fillStyle = 'rgb(229,110,86)';
-      ctx.lineWidth = 2.5;
-      ctx.fill();
-      ctx.stroke();
-    }
+    };
 
-    if (st.blueSpawnPoints && st.blueSpawnPoints.length > 0) {
-      for (var i = 0; i < st.blueSpawnPoints.length; i++) {
-        ctx.beginPath();
-        ctx.arc(st.blueSpawnPoints[i][0], st.blueSpawnPoints[i][1], 15, 0, Math.PI * 2, true);
-        ctx.fillStyle = 'rgb(86,137,229)';
-        ctx.lineWidth = 2.5;
-        ctx.fill();
-        ctx.stroke();
-        ctx.fillStyle = 'white';
-        ctx.font = 'bold 15px Arial';
-        var odl = (i + 1).toString().length > 1 ? 7.5 : 3.75
-        ctx.fillText('' + (i + 1), st.blueSpawnPoints[i][0] - odl, st.blueSpawnPoints[i][1] + 3.75)
-      }
-    } else {
-      ctx.beginPath();
-      ctx.arc(st.spawnDistance, 0, 15, 0, Math.PI * 2, true);
-      ctx.fillStyle = 'rgb(86,137,229)';
-      ctx.lineWidth = 2.5;
-      ctx.fill();
-      ctx.stroke();
-    }
+    renderSpawnPoints(st.redSpawnPoints, 'rgb(229,110,86)', -st.spawnDistance);
+    renderSpawnPoints(st.blueSpawnPoints, 'rgb(86,137,229)', st.spawnDistance);
 
   }
 
@@ -3038,17 +3616,15 @@ function renderStadium(st) {
 
 }
 
-function saveCanvas() {
-  canvas = document.getElementById('canvas');
-}
-
 function reloadStadium() {
   zoomScale = 1;
   resize_canvas();
   renderStadium(stadium);
   var el = document.getElementById('canvas_div');
-  el.scrollLeft = canvas_rect[2] - el.clientWidth / 2;
-  el.scrollTop = canvas_rect[3] - el.clientHeight / 2;
+  if (el && canvas_rect && canvas_rect.length > 1) {
+    el.scrollLeft = -canvas_rect[0] - el.clientWidth / 2;
+    el.scrollTop = -canvas_rect[1] - el.clientHeight / 2;
+  }
 }
 
 function new_stadium() {
@@ -3098,8 +3674,7 @@ function new_stadium() {
     "ballPhysics": {
       "radius": 10,
       "bCoef": 0.5,
-      "cMask": ["all"
-      ],
+      "cMask": ["all"],
       "damping": 0.99,
       "invMass": 1,
       "gravity": [0, 0],
@@ -3113,8 +3688,9 @@ function handleZoomChange(e) {
   var x = e.target.value;
   if (x <= 20) zoomScale = x / 20
   else zoomScale = (x - 18) / 2;
+  zoomScale = Math.max(zoomMin, Math.min(zoomMax, zoomScale));
   document.getElementById('zoomLabel').innerHTML = 'x' + zoomScale.toFixed(2);
-  renderStadium(stadium);
+  resize_canvas();
 }
 
 function handleButtonClick(e) {
@@ -3129,29 +3705,20 @@ function handleButtonClick(e) {
       $('#button_mirror_mode').removeClass('active');
       clear_mirror_data(stadium);
     }
-  } else if (a == 'button_redSpawnPoint') {
+  } else if (a == 'button_redSpawnPoint' || a == 'button_blueSpawnPoint') {
     var xxx = document.getElementById('prop_spawnPointX').value;
     var yyy = document.getElementById('prop_spawnPointY').value;
     document.getElementById("prop_spawnPointX").value = "";
     document.getElementById("prop_spawnPointY").value = "";
-    stadium.redSpawnPoints.push([Number(xxx), Number(yyy)]);
-  } else if (a == 'button_blueSpawnPoint') {
-    var xxx = document.getElementById('prop_spawnPointX').value;
-    var yyy = document.getElementById('prop_spawnPointY').value;
-    document.getElementById("prop_spawnPointX").value = "";
-    document.getElementById("prop_spawnPointY").value = "";
-    stadium.blueSpawnPoints.push([Number(xxx), Number(yyy)]);
-  } else if (a == 'button_resetRed') {
-    stadium.redSpawnPoints = [];
-    document.getElementById("button_resetRed").innerHTML = "Spawnpoints resetted!";
+    if (a == 'button_redSpawnPoint') stadium.redSpawnPoints.push([Number(xxx), Number(yyy)]);
+    else stadium.blueSpawnPoints.push([Number(xxx), Number(yyy)]);
+  } else if (a == 'button_resetRed' || a == 'button_resetBlue') {
+    if (a == 'button_resetRed') stadium.redSpawnPoints = [];
+    else stadium.blueSpawnPoints = [];
+    var btn = document.getElementById(a);
+    btn.innerHTML = "Spawnpoints resetted!";
     setTimeout(function () {
-      document.getElementById("button_resetRed").innerHTML = "Reset Spawnpoints";
-    }, 1200);
-  } else if (a == 'button_resetBlue') {
-    stadium.blueSpawnPoints = [];
-    document.getElementById("button_resetBlue").innerHTML = "Spawnpoints resetted!";
-    setTimeout(function () {
-      document.getElementById("button_resetBlue").innerHTML = "Reset Spawnpoints";
+      btn.innerHTML = "Reset Spawnpoints";
     }, 1200);
   } else if (a == 'pref_preview') {
     $('#pref_preview').toggleClass('active');
@@ -3195,7 +3762,7 @@ function handleButtonClick(e) {
     select_all(function () { return false; });
   } else if (a == 'button_inverse_selection') {
     select_all(function (shape) { return !selected(shape.object); });
-  } else if (a == 'copy') {
+  } else if (a == 'button_copy') {
     copy();
   } else if (a == 'button_paste') {
     paste();
@@ -3207,12 +3774,9 @@ function handleButtonClick(e) {
     duplicate();
     modified();
   } else if (a.startsWith('button_zoom')) {
-    var scroll = [document.getElementById('canvas_div').scrollTop, document.getElementById('canvas_div').scrollLeft, zoomScale];
     zoomScale = Number(a.substring(11));
     resize_canvas();
     renderStadium(stadium);
-    document.getElementById('canvas_div').scrollTop = scroll[0] * zoomScale / scroll[2];
-    document.getElementById('canvas_div').scrollLeft = scroll[1] * zoomScale / scroll[2];
   } else if (a == 'test_button') {
     document.getElementById("zoom").classList.toggle("hidden");
     document.getElementById("zoomLabel").classList.toggle("hidden");
@@ -3229,9 +3793,38 @@ function StadiumCreator() {
   const [counter, setCounter] = useState(0);
   const stadiumState = useSelector((state) => state.stadium.value);
   const mainMode = useSelector((state) => state.mainMode.value);
+  const overlay = useSelector((state) => state.overlay);
   const dispatch = useDispatch();
 
-  stadium = JSON.parse(JSON.stringify(stadiumState))
+  // Bridge: expose dispatch and overlay actions for module-level tool_overlay
+  _overlayDispatch = dispatch;
+  _overlayActions = {
+    setOverlayImage, setOverlayVisible, setOverlayLocked,
+    setOverlayOpacity, setOverlayPosition, setOverlayScale, clearOverlay
+  };
+
+  // Sync overlay state, refresh UI, and clear cache
+  useEffect(() => {
+    // 1. Update global overlay state for rendering and tool access
+    overlayState = overlay;
+
+    // 2. Clear image cache if overlay is cleared
+    if (!overlay.imageUrl) {
+      overlayImageCache = {};
+    }
+
+    // 3. Re-render canvas when overlay changes
+    if (stadium && stadium.bg) {
+      queue_render();
+    }
+
+    // 4. Refresh overlay tool UI if it's currently active
+    if (current_tool && current_tool.name === 'overlay') {
+      tool_overlay.init();
+    }
+  }, [overlay]);
+
+  stadium = JSON.parse(JSON.stringify(stadiumState));
 
   useEffect(() => {
     var can = document.getElementById('canvas');
@@ -3243,7 +3836,10 @@ function StadiumCreator() {
   }, [stadiumState]);
 
   useEffect(() => {
-    if (mainMode == 'stadiumCreator') $("#table").fadeTo(300, 1)
+    if (mainMode == 'stadiumCreator') {
+      $("#table").fadeTo(300, 1);
+      if (stadium && stadium !== '') reloadStadium();
+    }
   }, [mainMode]);
 
   useEffect(() => {
@@ -3251,11 +3847,38 @@ function StadiumCreator() {
       stadium = new_stadium();
       dispatch(editStadium(stadium));
     }
-    saveCanvas();
     load_tile('grass');
     load_tile('hockey');
 
     $(document).bind('keydown', handle_key);
+    $(document).bind('keyup', handle_keyup);
+
+    var cameraAnimationId;
+    function cameraLoop() {
+      var moved = false;
+      var speed = 3 / zoomScale; // Minimal movement speed
+
+      if (keysPressed[87]) { // W
+        cameraPos[1] -= speed;
+        moved = true;
+      }
+      if (keysPressed[83]) { // S
+        cameraPos[1] += speed;
+        moved = true;
+      }
+      if (keysPressed[65]) { // A
+        cameraPos[0] -= speed;
+        moved = true;
+      }
+      if (keysPressed[68]) { // D
+        cameraPos[0] += speed;
+        moved = true;
+      }
+
+      if (moved) queue_render();
+      cameraAnimationId = requestAnimationFrame(cameraLoop);
+    }
+    cameraAnimationId = requestAnimationFrame(cameraLoop);
 
     define_tab('properties');
     define_tab('advanced');
@@ -3263,7 +3886,6 @@ function StadiumCreator() {
     define_tab('joints');
     define_tab('spawnpoints');
     define_tab('basic_stadiums');
-    // define_tab('haxmaps')
 
     initialise_properties_css();
     populate_tab_properties();
@@ -3286,14 +3908,18 @@ function StadiumCreator() {
     add_tool(tool_goal);
     add_tool(tool_rotate);
     add_tool(tool_scale);
+    add_tool(tool_overlay);
 
     set_tool(tool_select);
 
     window.addEventListener("wheel", handleWheel, { passive: false })
 
     return () => {
+      $(document).unbind('keydown', handle_key);
+      $(document).unbind('keyup', handle_keyup);
+      cancelAnimationFrame(cameraAnimationId);
       window.removeEventListener('wheel', handleWheel);
-      window.removeEventListener('resize', resize)
+      window.removeEventListener('resize', resize);
     }
   }, []);
 
@@ -3301,283 +3927,234 @@ function StadiumCreator() {
     dispatch(editStadium(stadium));
   }
 
-  function addtoHaxmaps(e) {
-    // e.preventDefault();
-    // console.log(e);
-    // var err = 0;
-
-    // if ($('#map-name').val() == 'Name:' || $('#map-name').val() == '' || $('#map-name').val() == 'Goal Name/Owner:') {
-    //   $('#map-name').css("border", "1px solid red");
-    //   err = 1;
-    // } else
-    //   $('#map-name').css("border", "1px solid #3C312B");
-
-    // if ($('#map').val() != '') {
-    //   if ($('#map').val().indexOf($('#map').attr('rel')) == -1) {
-    //     $('.upload').css("border", "1px solid red");
-    //     err = 1;
-    //   } else
-    //     $('.upload').css("border", "1px solid #3C312B");
-    // } else {
-    //   $('.upload').css("border", "1px solid red");
-    //   err = 1;
-    // }
-
-    // stadium = props.stadium;
-    // for (let joint of stadium.joints) if (joint.length == "null") joint.length = null;
-    // if (stadium.canBeStored == "true" || stadium.canBestored == true) stadium.canBeStored = true;
-    // else stadium.canBeStored = false;
-    // var blob = new Blob([JSON.stringify(stadium)], { type: 'text/plain' });
-
-    // const formData = new FormData();
-    // formData.append('map-name', 'Test map by HBSE');
-    // formData.append('authornick', 'Haxball Stadium Editor');
-    // formData.append('description', 'Map made and uploaded by Haxball Stadium Editor');
-
-    // formData.append("map", blob, 'testStadium.hbs');
-
-    // const request = new XMLHttpRequest();
-    // request.open("POST", "https://haxmaps.com/hb/form");
-    // request.send(formData);
-
-    // request.onreadystatechange = function () {
-    //   if (request.readyState === 4) {
-    //     console.log(request.status);
-    //     console.log(request.responseText);
-    //   }
-    // };
-
-    // const file = new File([blob], "Test Stadium.hbs", {
-    //   type: "text/plain",
-    // });
-    // var a = window.document.createElement("a");
-    // a.href = window.URL.createObjectURL(blob);
-    // a.download = stadium.name + ".hbs";
-    // document.body.appendChild(a);
-    // console.log(a);
-    // $('#map').val = file
-    // if (err == 0) $('#upload').submit();
-    // $('#upload').submit();
-  }
-
   function handleWheel(e) {
     if (e.target.id === 'canvas') {
+      e.preventDefault();
+      e.stopPropagation();
+
+      var container = e.target.parentElement;
       var oldZoom = zoomScale;
+
+      // Mouse position relative to the container viewport
+      var containerRect = container.getBoundingClientRect();
+      var mouseXInContainer = e.clientX - containerRect.left;
+      var mouseYInContainer = e.clientY - containerRect.top;
+
+      // The world-space coordinate under the mouse before zoom
+      var worldX = (mouseXInContainer - canvas.width / 2) / oldZoom + cameraPos[0];
+      var worldY = (mouseYInContainer - canvas.height / 2) / oldZoom + cameraPos[1];
+
+      // Apply zoom
       if (e.deltaY > 0) zoomScale /= zoomFactor;
       else zoomScale *= zoomFactor;
 
-      var oldScrollLeft = {}, newScrollLeft = {}, moveScroll = {};
-      oldScrollLeft.x = current_mouse_position[0];
-      newScrollLeft.x = (e.layerX - canvas_rect[2] * zoomScale / oldZoom) / zoomScale;
-      moveScroll.x = (newScrollLeft.x - oldScrollLeft.x) * zoomScale;
+      // Clamp zoom to prevent extreme values
+      zoomScale = Math.max(zoomMin, Math.min(zoomMax, zoomScale));
 
-      oldScrollLeft.y = current_mouse_position[1];
-      newScrollLeft.y = (e.layerY - canvas_rect[3] * zoomScale / oldZoom) / zoomScale;
-      moveScroll.y = (newScrollLeft.y - oldScrollLeft.y) * zoomScale;
+      // Re-center around the same world point
+      cameraPos[0] = worldX - (mouseXInContainer - canvas.width / 2) / zoomScale;
+      cameraPos[1] = worldY - (mouseYInContainer - canvas.height / 2) / zoomScale;
 
-      resize_canvas();
+      // Rebuild canvas with new zoom - skip auto-render to avoid double-render
+      resize_canvas_core(true);
       renderStadium(stadium);
-
-      e.target.parentElement.scrollLeft -= moveScroll.x;
-      e.target.parentElement.scrollTop -= moveScroll.y;
-
-      e.preventDefault();
     }
   }
 
   return (
-
-    <table id="table" cellSpacing="7px" style={{ height: 864, opacity: 0.01 }}>
-      <tbody>
-        <tr>
-          <td colSpan="2" id="topbox" valign="top">
-            <table style={{ width: '100%', height: '100%' }}>
-              <tbody>
-                <CreatorHeader updateStadium={updateStadium} />
-                <tr>
-                  <td style={{ height: "100%" }}>
-                    <div id="canvas_div_placeholder">
-                      <div id="canvas_div" style={{ top: 86, left: 49, width: 860, height: 612 }}>
-                        {/* <canvas id="canvas" style={{ width: 840, height: 592, cursor: "default" }}></canvas> */}
-                        <canvas id="canvas" onMouseUpCapture={handle_up} style={{ width: 840, height: 592 }} onMouseDownCapture={handle_down} onMouseMove={handle_move} ></canvas>
+    <div>
+      <table id="table" cellSpacing="7px" style={{ height: 864, opacity: 0.01 }}>
+        <tbody>
+          <tr>
+            <td colSpan="2" id="topbox" valign="top">
+              <table style={{ width: '100%', height: '100%' }}>
+                <tbody>
+                  <CreatorHeader updateStadium={updateStadium} />
+                  <tr>
+                    <td style={{ height: "100%" }}>
+                      <div id="canvas_div_placeholder">
+                        <div id="canvas_div" style={{ top: 86, left: 49, width: 860, height: 612, overflow: 'hidden' }}>
+                          <canvas id="canvas" onMouseUpCapture={handle_up} style={{ width: 840, height: 592 }} onMouseDownCapture={handle_down} onMouseMove={handle_move} ></canvas>
+                        </div>
                       </div>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </td>
-        </tr>
-        <tr id="bottomboxes">
-          <td id="leftbox" valign="top">
-            <table style={{ width: '100%' }}>
-              <tbody>
-                <tr>
-                  <td id="left_tabs">
-                    <button id="button_tab_properties" className="active">
-                      <img alt='img' src={logoProperties} style={{ height: 12, width: 12 }} />Properties
-                    </button>
-                    {/* <button id="button_tab_edit">Edit</button> */}
-                    <button id="button_tab_advanced" >
-                      <img alt='img' src={logoTools} style={{ height: 12, width: 12 }} />Tools
-                    </button>
-                    {/* <button id="button_tab_spawnpoints">SpawnPoints</button> */}
-                  </td>
-                  <td>
-                    <div id="tab_parent">
-                      <div id="tab_properties" className="selected_tool_other">
-                      </div>
-                      <div id="tab_advanced" className="hidden">
-                        <table>
-                          <tbody>
-                            <tr>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+          <tr id="bottomboxes">
+            <td id="leftbox" valign="top">
+              <table style={{ width: '100%' }}>
+                <tbody>
+                  <tr>
+                    <td id="left_tabs">
+                      <button id="button_tab_properties" className="active">
+                        <img alt='img' src={logoProperties} style={{ height: 12, width: 12 }} />Properties
+                      </button>
+                      <button id="button_tab_advanced" >
+                        <img alt='img' src={logoTools} style={{ height: 12, width: 12 }} />Tools
+                      </button>
+                    </td>
+                    <td>
+                      <div id="tab_parent">
+                        <div id="tab_properties" className="selected_tool_other">
+                        </div>
+                        <div id="tab_advanced" className="hidden">
+                          <table>
+                            <tbody>
+                              <tr>
+                                <td>
+                                  <button id="button_tab_spawnpoints">SpawnPoints</button>
+                                  <button id="button_tab_joints">Joints</button>
+                                  <button id="button_mirror_mode" onClick={handleButtonClick}>
+                                    <img alt='img' src={imgMirror} style={{ height: 12, width: 12 }} />Automatic Mirror
+                                  </button>
+                                  <button id="pref_preview" onClick={handleButtonClick}>
+                                    <img alt='img' src={imgPreview} style={{ height: 12, width: 12 }} />Preview
+                                  </button>
+                                  <button id="button_tab_basic_stadiums">Load Basic Stadiums</button>
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                        <div id="tab_joints" className="hidden" style={{ width: '100%' }}>
+                          <table>
+                            <tbody>
+                              <tr>
+                                <td>
+                                  <label className="prop" style={{ width: 40 }}>length:</label>
+                                  <input className="prop" type="text" id="inputLength" defaultValue="null" />
+                                  <label className="prop" style={{ width: 35 }}>color:</label>
+                                  <input className="prop" type="text" id="inputColor" defaultValue="transparent" />
+                                  <label className="prop" style={{ width: 53 }}>strength:</label>
+                                  <input className="prop" type="text" id="inputStrength" defaultValue="rigid" />
+                                  <button id="button_addJoint" onClick={handleButtonClick} style={{ backgroundColor: "#696969" }} onMouseOver={jointAlertOn} onMouseOut={jointAlertOff} >
+                                    Add Joint
+                                  </button>
+                                  <label id="joint_alert"></label>
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                        <div id="tab_spawnpoints" className="hidden">
+                          <table>
+                            <tbody><tr>
                               <td>
-                                <button id="button_tab_spawnpoints">SpawnPoints</button>
-                                <button id="button_tab_joints">Joints</button>
-                                <button id="button_mirror_mode" onClick={handleButtonClick}>
-                                  <img alt='img' src={imgMirror} style={{ height: 12, width: 12 }} />Automatic Mirror
+                                <label className="prop" style={{ width: 25 }}>x:</label>
+                                <input className="prop" type="text" id="prop_spawnPointX" />
+                                <label className="prop" style={{ width: 25 }}>y:</label>
+                                <input className="prop" type="text" id="prop_spawnPointY" />
+                                <button id="button_redSpawnPoint" onClick={handleButtonClick} style={{ backgroundColor: "#e56e56" }}>
+                                  Add Spawn Point
                                 </button>
-                                <button id="pref_preview" onClick={handleButtonClick}>
-                                  <img alt='img' src={imgPreview} style={{ height: 12, width: 12 }} />Preview
+                                <button id="button_blueSpawnPoint" onClick={handleButtonClick} style={{ backgroundColor: "#598ae5" }}>
+                                  Add Spawn Point
                                 </button>
-                                <button id="button_tab_basic_stadiums">Load Basic Stadiums</button>
-                                {/* <button id="button_tab_haxmaps">HaxMaps</button> */}
+                                <button id="button_resetRed" onClick={handleButtonClick} style={{ backgroundColor: "#e56e56", color: 'black' }}>
+                                  Reset Spawnpoints
+                                </button>
+                                <button id="button_resetBlue" onClick={handleButtonClick} style={{ backgroundColor: "#598ae5", color: 'black' }}>
+                                  Reset Spawnpoints
+                                </button>
                               </td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-                      <div id="tab_joints" className="hidden" style={{ width: '100%' }}>
-                        <table>
-                          <tbody>
-                            <tr>
+                            </tr></tbody>
+                          </table>
+                        </div>
+
+                        <div id="tab_basic_stadiums" className="hidden">
+                          <table>
+                            <tbody><tr>
                               <td>
-                                <label className="prop" style={{ width: 40 }}>length:</label>
-                                <input className="prop" type="text" id="inputLength" defaultValue="null" />
-                                <label className="prop" style={{ width: 35 }}>color:</label>
-                                <input className="prop" type="text" id="inputColor" defaultValue="transparent" />
-                                <label className="prop" style={{ width: 53 }}>strength:</label>
-                                <input className="prop" type="text" id="inputStrength" defaultValue="rigid" />
-                                <button id="button_addJoint" onClick={handleButtonClick} style={{ backgroundColor: "#696969" }} onMouseOver={jointAlertOn} onMouseOut={jointAlertOff} >
-                                  Add Joint
-                                </button>
-                                <label id="joint_alert"></label>
+                                <button id="button_loadBasic_big_easy" onClick={handleButtonClick}>Big Easy</button>
+                                <button id="button_loadBasic_big_hockey" onClick={handleButtonClick}>Big Hockey</button>
+                                <button id="button_loadBasic_big_rounded" onClick={handleButtonClick}>Big Rounded</button>
+                                <button id="button_loadBasic_big" onClick={handleButtonClick}>Big</button>
+                                <button id="button_loadBasic_classic" onClick={handleButtonClick}>Classic</button>
+                                <button id="button_loadBasic_easy" onClick={handleButtonClick}>Easy</button>
+                                <button id="button_loadBasic_hockey" onClick={handleButtonClick}>Hockey</button>
+                                <button id="button_loadBasic_huge" onClick={handleButtonClick}>Huge</button>
+                                <button id="button_loadBasic_rounded" onClick={handleButtonClick}>Rounded</button>
+                                <button id="button_loadBasic_small" onClick={handleButtonClick}>Small</button>
                               </td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-                      <div id="tab_spawnpoints" className="hidden">
-                        <table>
-                          <tbody><tr>
-                            <td>
-                              <label className="prop" style={{ width: 25 }}>x:</label>
-                              <input className="prop" type="text" id="prop_spawnPointX" />
-                              <label className="prop" style={{ width: 25 }}>y:</label>
-                              <input className="prop" type="text" id="prop_spawnPointY" />
-                              <button id="button_redSpawnPoint" onClick={handleButtonClick} style={{ backgroundColor: "#e56e56" }}>
-                                Add Spawn Point
-                              </button>
-                              <button id="button_blueSpawnPoint" onClick={handleButtonClick} style={{ backgroundColor: "#598ae5" }}>
-                                Add Spawn Point
-                              </button>
-                              <button id="button_resetRed" onClick={handleButtonClick} style={{ backgroundColor: "#e56e56", color: 'black' }}>
-                                Reset Spawnpoints
-                              </button>
-                              <button id="button_resetBlue" onClick={handleButtonClick} style={{ backgroundColor: "#598ae5", color: 'black' }}>
-                                Reset Spawnpoints
-                              </button>
-                            </td>
-                          </tr></tbody>
-                        </table>
-                      </div>
+                            </tr></tbody>
+                          </table>
+                        </div>
 
-                      <div id="tab_basic_stadiums" className="hidden">
-                        <table>
-                          <tbody><tr>
-                            <td>
-                              <button id="button_loadBasic_big_easy" onClick={handleButtonClick}>Big Easy</button>
-                              <button id="button_loadBasic_big_hockey" onClick={handleButtonClick}>Big Hockey</button>
-                              <button id="button_loadBasic_big_rounded" onClick={handleButtonClick}>Big Rounded</button>
-                              <button id="button_loadBasic_big" onClick={handleButtonClick}>Big</button>
-                              <button id="button_loadBasic_classic" onClick={handleButtonClick}>Classic</button>
-                              <button id="button_loadBasic_easy" onClick={handleButtonClick}>Easy</button>
-                              <button id="button_loadBasic_hockey" onClick={handleButtonClick}>Hockey</button>
-                              <button id="button_loadBasic_huge" onClick={handleButtonClick}>Huge</button>
-                              <button id="button_loadBasic_rounded" onClick={handleButtonClick}>Rounded</button>
-                              <button id="button_loadBasic_small" onClick={handleButtonClick}>Small</button>
-                            </td>
-                          </tr></tbody>
-                        </table>
-                      </div>
 
-                      <div id="tab_haxmaps" className="hidden">
-                        <table><tbody><tr>
-                          <td>
-                            <button onClick={addtoHaxmaps}></button>
-                            {/* <form id="upload" action="https://haxmaps.com/hb/form" method="post" enctype="multipart/form-data">
-                              <input type="text" name="map-name" id="map-name" defaultValue="Name:" />
-                              <input type="text" name="authornick" id="authornick" defaultValue="Author (optional):" />
-                              <textarea name="description" id="description">About (optional):</textarea>
-                              <div className="hidden3">
-                                <input type="file" name="map" id="map" rel=".hbs" accept=".hbs" />
-                              </div>
-                              <div class="upload">
-                                Choose Map (.hbs)
-                              </div>
-                              <input type="file" name="map" id="map" rel=".hbs" accept=".hbs" />
-                              <p></p><center>
-                                <h2>If you want to update one of your maps, please use the "Update map" button bellow the map instead.</h2>
-                              </center><p></p>
-                              <p></p><center>You can also connect with <a href="https://haxrec.com">HaxRec</a> or <a href="https://haxcolors.com">HaxColors</a>.</center><p></p>
-                              <div className="hidden">
-                                <input type="text" name="goal" value="Enter Replay ID from HaxRec.com (Optional):" onfocus="if(this.value=='Enter Replay ID from HaxRec.com (Optional):') this.value='';" onblur="if(this.value=='') this.value='Enter Replay ID from HaxRec.com (Optional):';" />
-                                <input type="text" name="color" value="Enter Color ID from HaxColors.com (Optional):" onfocus="if(this.value=='Enter Color ID from HaxColors.com (Optional):') this.value='';" onblur="if(this.value=='') this.value='Enter Color ID from HaxColors.com (Optional):';" />
-                              </div>
-                              <input value="Upload" class="submit" type="button" onClick={addtoHaxmaps} />
-                            </form> */}
-                          </td>
-                        </tr></tbody>
-                        </table>
                       </div>
-                    </div>
-                  </td>
-                  <td>
-                    <div id="tab_sub" className="active" style={{ position: 'fixed', bottom: 5, left: 37, height: 27.5, width: '100%', display: 'inline' }}>
-                      <button id="button_undo" onClick={undo} style={{ backgroundColor: '#5872A5' }}><img alt='img' src={imgUndo} style={{ height: 12, width: 12 }} />Undo</button>
-                      <button id="button_redo" onClick={redo} style={{ backgroundColor: "#5872A5" }}> <img alt='img' src={imgRedo} style={{ height: 12, width: 12 }} />Redo</button>
-                      <button id="button_copy" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} > <img alt='img' src={imgCopy} style={{ height: 12, width: 12 }} />Copy</button>
-                      <button id="button_paste" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} > <img alt='img' src={imgPaste} style={{ height: 12, width: 12 }} />Paste</button>
-                      <button id="button_delete" onClick={handleButtonClick} style={{ backgroundColor: "#BB2929" }}> <img alt='img' src={imgDelete} style={{ height: 12, width: 12 }} />Delete</button>
-                      <button id="button_select_all" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} > <img alt='img' src={imgSelectAll} style={{ height: 12, width: 12 }} />Select All</button>
-                      <button id="button_select_none" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }}> <img alt='img' src={imgSelectNone} style={{ height: 12, width: 12 }} />Select None</button>
-                      <button id="button_inverse_selection" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }}> <img alt='img' src={imgInverse} style={{ height: 12, width: 12 }} />Inverse Selection</button>
-                      <button id="button_duplicate" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }}> <img alt='img' src={imgDuplicate} style={{ height: 12, width: 12 }} />Duplicate</button >
-                      <button id="button_cut" onClick={handleButtonClick} style={{ backgroundColor: "#BB2929" }}> <img alt='img' src={imgClear} style={{ height: 12, width: 12 }} />Cut</button >
-                      <button id="test_button" onClick={handleButtonClick} style={{ backgroundColor: '#9b009b' }}>Zoom</button >
-                      <input className='hidden' onChange={handleZoomChange} style={{ height: 12 }} type="range" id="zoom" name="zoom"
-                        min="1" max="39" step="0.1" defaultValue="20" />
-                      <label className='hidden' id='zoomLabel'>x1</label>
-                    </div >
-                  </td >
-                </tr >
-              </tbody >
-            </table >
-          </td >
-          <td id="rightbox" valign="top">
-            <pre id="mousepos" className="right">285, 23</pre>
-            <button id="button_tool_select" className="active" style={{ width: 95 }}><img alt='img' src={logoSelect} style={{ height: 12, width: 12 }} />Select</button>
-            <button id="button_tool_rotate" style={{ width: 100 }}><img alt='img' src={logoRotate} style={{ height: 12, width: 12 }} />Rotate</button>
-            <button id="button_tool_scale" style={{ width: 100 }}><img alt='img' src={logoScale} style={{ height: 12, width: 12 }} />Scale</button>
-            <button id="button_tool_segment" style={{ width: 130 }}><img alt='img' src={logoSegment} style={{ height: 12, width: 12 }} />Segment</button>
-            <button id="button_tool_vertex" style={{ width: 137 }}><img alt='img' src={logoVertex} style={{ height: 12, width: 12 }} />Vertex</button>
-            <button id="button_tool_disc" style={{ width: 95 }}><img alt='img' src={logoDisc} style={{ height: 12, width: 12 }} />Disc</button>
-            <button id="button_tool_goal" style={{ width: 95 }}><img alt='img' src={logoGoal} style={{ height: 12, width: 12 }} />Goal</button>
-            <button id="button_tool_plane" style={{ width: 100 }}><img alt='img' src={logoPlane} style={{ height: 12, width: 12 }} />Plane</button>
-          </td>
-        </tr >
-      </tbody >
-    </table >
+                    </td>
+                    <td>
+                      <div id="tab_sub" className="active" style={{ position: 'fixed', bottom: 5, left: 37, height: 27.5, width: '100%', display: 'inline' }}>
+                        <button id="button_undo" onClick={undo} style={{ backgroundColor: '#5872A5', transition: 'all 0.2s ease' }} title="Undo (Ctrl+Z)">
+                          <img alt='img' src={imgUndo} style={{ height: 12, width: 12 }} />Undo
+                        </button>
+                        <button id="button_redo" onClick={redo} style={{ backgroundColor: "#5872A5", transition: 'all 0.2s ease' }} title="Redo (Ctrl+Y)">
+                          <img alt='img' src={imgRedo} style={{ height: 12, width: 12 }} />Redo
+                        </button>
+                        <button id="button_copy" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} title="Copy (Ctrl+C)">
+                          <img alt='img' src={imgCopy} style={{ height: 12, width: 12 }} />Copy
+                        </button>
+                        <button id="button_paste" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} title="Paste (Ctrl+V)">
+                          <img alt='img' src={imgPaste} style={{ height: 12, width: 12 }} />Paste
+                        </button>
+                        <button id="button_delete" onClick={handleButtonClick} style={{ backgroundColor: "#BB2929" }} title="Delete (Del)">
+                          <img alt='img' src={imgDelete} style={{ height: 12, width: 12 }} />Delete
+                        </button>
+                        <button id="button_select_all" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} title="Select All (Ctrl+A)">
+                          <img alt='img' src={imgSelectAll} style={{ height: 12, width: 12 }} />Select All
+                        </button>
+                        <button id="button_select_none" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} title="Select None">
+                          <img alt='img' src={imgSelectNone} style={{ height: 12, width: 12 }} />Select None
+                        </button>
+                        <button id="button_inverse_selection" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} title="Inverse Selection">
+                          <img alt='img' src={imgInverse} style={{ height: 12, width: 12 }} />Inverse Selection
+                        </button>
+                        <button id="button_duplicate" onClick={handleButtonClick} style={{ backgroundColor: "#5872A5" }} title="Duplicate (Ctrl+D)">
+                          <img alt='img' src={imgDuplicate} style={{ height: 12, width: 12 }} />Duplicate
+                        </button>
+                        <button id="button_cut" onClick={handleButtonClick} style={{ backgroundColor: "#BB2929" }} title="Cut (Ctrl+X)">
+                          <img alt='img' src={imgClear} style={{ height: 12, width: 12 }} />Cut
+                        </button>
+                        <button id="button_history_info" onClick={showHistoryInfo} style={{ backgroundColor: '#4CAF50' }} title="History Info (H)">
+                          📚 History
+                        </button>
+                        <button id="button_clear_history" onClick={() => {
+                          if (window.confirm('Tüm geçmişi temizlemek istediğinizden emin misiniz?')) {
+                            clearHistory();
+                          }
+                        }} style={{ backgroundColor: '#FF9800' }} title="Clear History (Ctrl+Delete)">
+                          🗑️ Clear
+                        </button>
+                        <button id="test_button" onClick={handleButtonClick} style={{ backgroundColor: '#9b009b' }}>Zoom</button>
+                        <input className='hidden' onChange={handleZoomChange} style={{ height: 12 }} type="range" id="zoom" name="zoom"
+                          min="1" max="39" step="0.1" defaultValue="20" />
+                        <label className='hidden' id='zoomLabel'>x1</label>
+                      </div>
+                    </td >
+                  </tr >
+                </tbody >
+              </table >
+            </td >
+            <td id="rightbox" valign="top">
+              <pre id="mousepos" className="right">285, 23</pre>
+              <button id="button_tool_select" className="active" style={{ width: 95 }}><img alt='img' src={logoSelect} style={{ height: 12, width: 12 }} />Select</button>
+              <button id="button_tool_rotate" style={{ width: 100 }}><img alt='img' src={logoRotate} style={{ height: 12, width: 12 }} />Rotate</button>
+              <button id="button_tool_scale" style={{ width: 100 }}><img alt='img' src={logoScale} style={{ height: 12, width: 12 }} />Scale</button>
+              <button id="button_tool_segment" style={{ width: 130 }}><img alt='img' src={logoSegment} style={{ height: 12, width: 12 }} />Segment</button>
+              <button id="button_tool_vertex" style={{ width: 137 }}><img alt='img' src={logoVertex} style={{ height: 12, width: 12 }} />Vertex</button>
+              <button id="button_tool_disc" style={{ width: 95 }}><img alt='img' src={logoDisc} style={{ height: 12, width: 12 }} />Disc</button>
+              <button id="button_tool_goal" style={{ width: 95 }}><img alt='img' src={logoGoal} style={{ height: 12, width: 12 }} />Goal</button>
+              <button id="button_tool_plane" style={{ width: 100 }}><img alt='img' src={logoPlane} style={{ height: 12, width: 12 }} />Plane</button>
+              <button id="button_tool_overlay" style={{ width: 120 }}>Overlay</button>
+            </td>
+          </tr >
+        </tbody >
+      </table >
+
+    </div>
   );
 }
 

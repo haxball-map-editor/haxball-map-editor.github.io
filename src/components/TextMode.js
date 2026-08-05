@@ -65,7 +65,6 @@ function TextMode() {
   }
 
   function pprint(j, l, tag, parent) {
-    // console.log('pprint', j, l, tag, parent);
     if (!l) l = 0;
     if (parent == "length" && j == null) return j;
     if (parent == "canBeStored") {
@@ -139,6 +138,57 @@ function TextMode() {
     }
   }
 
+  var defaultStadium = {
+    name: "New Stadium",
+    width: 420,
+    height: 200,
+    cameraWidth: 0,
+    cameraHeight: 0,
+    maxViewWidth: 0,
+    cameraFollow: "ball",
+    spawnDistance: 170,
+    redSpawnPoints: [],
+    blueSpawnPoints: [],
+    canBeStored: true,
+    kickOffReset: "partial",
+    bg: { "color": "718C5A" },
+    traits: {
+      "ballArea": { "vis": false, "bCoef": 1, "cMask": ["ball"] },
+      "goalPost": { "radius": 8, "invMass": 0, "bCoef": 0.5 },
+      "goalNet": { "vis": true, "bCoef": 0.1, "cMask": ["ball"] },
+      "kickOffBarrier": { "vis": false, "bCoef": 0.1, "cGroup": ["redKO", "blueKO"], "cMask": ["red", "blue"] }
+    },
+    vertexes: [],
+    segments: [],
+    goals: [],
+    discs: [],
+    planes: [],
+    joints: [],
+    "playerPhysics": {
+      "radius": 15,
+      "bCoef": 0.5,
+      "invMass": 0.5,
+      "damping": 0.96,
+      "cGroup": ["red", "blue"],
+      "acceleration": 0.1,
+      "gravity": [0, 0],
+      "kickingAcceleration": 0.07,
+      "kickingDamping": 0.96,
+      "kickStrength": 5,
+      "kickback": 0,
+    },
+    "ballPhysics": {
+      "radius": 10,
+      "bCoef": 0.5,
+      "cMask": ["all"],
+      "damping": 0.99,
+      "invMass": 1,
+      "gravity": [0, 0],
+      "color": "ffffff",
+      "cGroup": ["ball"]
+    }
+  }
+
   function handleClick(e) {
     if (e.target.id === 'button_import_import') {
       var st;
@@ -175,37 +225,23 @@ function TextMode() {
       })
     } else if (e.target.id === 'button_import_cancel') {
       dispatch(editStadiumText(pprint(stadium)));
-    } else if (e.target.id === 'button_import_goto') {
-      alert('This function is currently in development');
     } else if (e.target.id === 'button_import_clear') {
       var detect_desn = window.confirm('Are you sure?');
-      if (detect_desn) dispatch(editStadiumText(''));
+      if (detect_desn) dispatch(editStadiumText(JSON.stringify(defaultStadium)));
       else return false;
     } else if (e.target.id === 'button_import_select_all') {
-      var stadiumToCopy = stadiumText;
-      try {
-        JSON.parse(stadiumToCopy);
-      } catch (error) {
-        return alert('Can not copy stadium - text is not a proper JSON Object. Please fix errors or click button Cancel Changes');
-      }
-      stadiumToCopy = JSON.parse(stadiumToCopy);
-      for (let joint of stadiumToCopy.joints) if (joint.length == "null") joint.length = null;
-      if (stadiumToCopy.canBeStored == "true" || stadiumToCopy.canBestored == true) stadiumToCopy.canBeStored = true;
-      else stadiumToCopy.canBeStored = false;
-      var toCopy = JSON.stringify(stadiumToCopy);
       const el = document.createElement('textarea');
-      el.value = toCopy;
+      el.value = stadiumText;
       document.body.appendChild(el);
       el.select();
       document.execCommand('copy');
       document.body.removeChild(el);
-      document.getElementById("button_import_select_all").innerHTML = "COPIED!";
+      
+      const btn = document.getElementById("button_import_select_all");
+      btn.innerHTML = "COPIED!";
       setTimeout(function () {
-        document.getElementById("button_import_select_all").innerHTML = "Copy All";
+        btn.innerHTML = "Copy All";
       }, 2000);
-      if (stadiumToCopy.canBeStored == true) stadiumToCopy.canBeStored = "true";
-      else stadiumToCopy.canBeStored = "false";
-      for (let joint of stadiumToCopy.joints) if (joint.length == null) joint.length = "null";
     } else if (e.target.id == 'button_downloadMap') {
       var stadiumToCopy = JSON.parse(JSON.stringify(stadium));
       for (let joint of stadiumToCopy.joints) if (joint.length == "null") joint.length = null;
@@ -254,14 +290,11 @@ function TextMode() {
                 <button id="button_import_clear" onClick={handleClick}>
                   Clear
                 </button>
-                <button id="button_import_goto" onClick={handleClick}>
-                  Goto Character
-                </button>
                 <button id="button_import_select_all" onClick={handleClick} style={{ backgroundColor: 'green' }}>
                   Copy All
                 </button>
                 <button id="button_downloadMap" onClick={handleClick} style={{ backgroundColor: 'green' }}>Download .hbs file</button>
-                <label>{'Load .hbs file ->'}</label>
+                <label>{ }</label>
                 <input type="file" id="loadHBS" onChange={handleFileLoad} />
               </td>
             </tr>

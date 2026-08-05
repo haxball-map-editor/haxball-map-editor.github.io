@@ -2,11 +2,13 @@ import { configureStore } from '@reduxjs/toolkit'
 import mainModeReducer from './reducers/mainModeSlice'
 import stadiumReducer from './reducers/stadiumSlice'
 import versionReducer from './reducers/versionSlice'
+import overlayReducer from './reducers/overlaySlice'
 
 export default configureStore({
   reducer: {
     stadium: stadiumReducer,
     mainMode: mainModeReducer,
-    version: versionReducer
+    version: versionReducer,
+    overlay: overlayReducer
   },
 })

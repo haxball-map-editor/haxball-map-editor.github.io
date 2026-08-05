@@ -109,8 +109,7 @@ function Changelog(props) {
       {newChanges}
       <h4>(2020-04-17) v2.10</h4>
       <ul>
-        <li>Added an alert when user tries to load too big map (max width/height is 65535). Stadium will be displayed
-          in a limited way (8000x8000)</li>
+        <li>Removed size limitation alerts - stadiums can now be any size without restrictions</li>
       </ul>
       <h4>(2020-04-16) v2.09</h4>
       <ul>

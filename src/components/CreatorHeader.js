@@ -1,6 +1,5 @@
 import logoTextMode from '../HBSE_files/top-tools/top-tools_text.png';
 import logoProperties from '../HBSE_files/top-tools/top-tools_pr.png';
-import logoHelp from "../HBSE_files/top-tools/top-tools_help.png";
 import $ from 'jquery'
 import { editStadium } from '../reducers/stadiumSlice';
 import { setMainMode } from '../reducers/mainModeSlice';
@@ -33,10 +32,6 @@ function CreatorHeader(props) {
           dispatch(setMainMode('propertiesTab'));
         }
       })
-    } else if (e.target.id === 'button_help' || e.target.parentElement.id === 'button_help') {
-      $("#table").fadeTo(300, 0.01, "linear", function () {
-        dispatch(setMainMode('helpTab'));
-      })
     }
   }
 
@@ -68,12 +63,7 @@ function CreatorHeader(props) {
                   {mainMode === 'propertiesTab' ? 'Creator' : 'Properties'}
                 </button>
               </td>
-              <td>
-                <button id="button_help" style={{ width: 95 }} onClick={handleClick}>
-                  <img alt='img' src={logoHelp} style={{ height: 12, width: 12 }} />
-                  Help
-                </button>
-              </td>
+
             </tr>
           </tbody>
         </table>
