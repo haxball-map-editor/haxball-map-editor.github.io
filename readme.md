@@ -6,7 +6,7 @@ A powerful, visual, web-based stadium editor for **HaxBall**. This tool allows y
 
 ## 🚀 Live Demo
 
-You can try the live version of the editor here: **[HaxBall Stadium Editor](https://haxball-stadium-editor.github.io/)** *(or configure your own GitHub Pages link)*.
+You can try the live version of the editor here: **[HaxBall Stadium Editor](https://haxball-map-editor.github.io/)** *(or configure your own GitHub Pages link)*.
 
 ---
 
