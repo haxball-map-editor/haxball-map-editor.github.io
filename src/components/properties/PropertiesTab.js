@@ -281,8 +281,8 @@ function PropertiesTab() {
     // Convert segments to joints
     const newJoints = nextStadium.segments.map(s => {
       const joint = {
-        d0: s.v0 + discOffset + 1,
-        d1: s.v1 + discOffset + 1,
+        d0: s.v0 + discOffset + (nextStadium.ballPhysics === "disc0" ? 0 : 1),
+        d1: s.v1 + discOffset + (nextStadium.ballPhysics === "disc0" ? 0 : 1),
         strength: "rigid"
       };
       if (s.color) joint.color = s.color;

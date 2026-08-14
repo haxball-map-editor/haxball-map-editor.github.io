@@ -1100,7 +1100,9 @@ function select_rect(st, a, b) {
         break;
 
       case 'joints':
-        if (selected(st.discs[o.d0 - 1]) && selected(st.discs[o.d1 - 1])) {
+        var idx0 = (st.ballPhysics === "disc0") ? o.d0 : o.d0 - 1;
+        var idx1 = (st.ballPhysics === "disc0") ? o.d1 : o.d1 - 1;
+        if (selected(st.discs[idx0]) && selected(st.discs[idx1])) {
           shape_set_selected(shape, true);
           count++;
         }
@@ -1632,8 +1634,10 @@ function segment_points(st, segment) {
 }
 
 function joint_points(st, joint) {
-  var a = st.discs[joint.d0 - 1];
-  var b = st.discs[joint.d1 - 1];
+  var idx0 = (st.ballPhysics === "disc0") ? joint.d0 : joint.d0 - 1;
+  var idx1 = (st.ballPhysics === "disc0") ? joint.d1 : joint.d1 - 1;
+  var a = st.discs[idx0];
+  var b = st.discs[idx1];
   return {
     a: [a.pos[0], a.pos[1]],
     b: [b.pos[0], b.pos[1]]
@@ -1900,12 +1904,16 @@ function delete_selected(st) {
 
   if (deletedDiscIndices.length > 0 && st.joints) {
     st.joints = st.joints.filter(function (joint) {
-      return !deletedDiscIndices.includes(joint.d0 - 1) && !deletedDiscIndices.includes(joint.d1 - 1);
+      var idx0 = (st.ballPhysics === "disc0") ? joint.d0 : joint.d0 - 1;
+      var idx1 = (st.ballPhysics === "disc0") ? joint.d1 : joint.d1 - 1;
+      return !deletedDiscIndices.includes(idx0) && !deletedDiscIndices.includes(idx1);
     });
 
     $.each(st.joints, function (j, joint) {
-      var d0_shift = deletedDiscIndices.filter(idx => idx < joint.d0 - 1).length;
-      var d1_shift = deletedDiscIndices.filter(idx => idx < joint.d1 - 1).length;
+      var idx0 = (st.ballPhysics === "disc0") ? joint.d0 : joint.d0 - 1;
+      var idx1 = (st.ballPhysics === "disc0") ? joint.d1 : joint.d1 - 1;
+      var d0_shift = deletedDiscIndices.filter(idx => idx < idx0).length;
+      var d1_shift = deletedDiscIndices.filter(idx => idx < idx1).length;
       joint.d0 -= d0_shift;
       joint.d1 -= d1_shift;
     });
@@ -3003,8 +3011,10 @@ function clone_selected(st) {
   // Now add joints that connect selected discs or are directly selected
   if (st.joints) {
     $.each(st.joints, function (i, joint) {
-      var disc0 = st.discs[joint.d0 - 1];
-      var disc1 = st.discs[joint.d1 - 1];
+      var idx0 = (st.ballPhysics === "disc0") ? joint.d0 : joint.d0 - 1;
+      var idx1 = (st.ballPhysics === "disc0") ? joint.d1 : joint.d1 - 1;
+      var disc0 = st.discs[idx0];
+      var disc1 = st.discs[idx1];
 
       // Clone joint if it's selected OR if both connected discs are selected
       if (selected(joint) || (disc0 && disc1 && selected(disc0) && selected(disc1))) {
@@ -3061,8 +3071,8 @@ function import_snippet(st, snip) {
       var copy = $.extend(true, {}, shape.object);
 
       // Find the new disc indices for the discs this joint connects
-      var oldD0 = copy.d0 - 1; // Convert to 0-based index
-      var oldD1 = copy.d1 - 1; // Convert to 0-based index
+      var oldD0 = (st.ballPhysics === "disc0") ? copy.d0 : copy.d0 - 1; // Convert to 0-based index
+      var oldD1 = (st.ballPhysics === "disc0") ? copy.d1 : copy.d1 - 1; // Convert to 0-based index
 
       // Find the corresponding new disc indices
       var newD0 = -1;
@@ -3083,8 +3093,8 @@ function import_snippet(st, snip) {
       // Only create joint if both discs were duplicated (i.e., both have new indices)
       if (newD0 !== -1 && newD1 !== -1) {
         // Update joint references to new disc indices
-        copy.d0 = newD0 + 1; // Convert back to 1-based index
-        copy.d1 = newD1 + 1; // Convert back to 1-based index
+        copy.d0 = (st.ballPhysics === "disc0") ? newD0 : newD0 + 1; // Convert back
+        copy.d1 = (st.ballPhysics === "disc0") ? newD1 : newD1 + 1; // Convert back to 1-based index
 
         st[shape.type][index] = copy;
         shape_set_selected(Shape(shape.type, st[shape.type][index], index), true);
@@ -3516,8 +3526,10 @@ function renderStadium(st) {
   $.each(st.joints, function (i, joint) {
     transform(Shape('joints', joint, i), function () {
       joint = complete(st, joint);
-      var d0 = stadium.discs[joint.d0 - 1];
-      var d1 = stadium.discs[joint.d1 - 1];
+      var idx0 = (stadium.ballPhysics === "disc0") ? joint.d0 : joint.d0 - 1;
+      var idx1 = (stadium.ballPhysics === "disc0") ? joint.d1 : joint.d1 - 1;
+      var d0 = stadium.discs[idx0];
+      var d1 = stadium.discs[idx1];
       if (!d0 || !d1 || !d0.pos || !d1.pos) return;
 
       ctx.beginPath();
@@ -3733,8 +3745,8 @@ function handleButtonClick(e) {
     var joint = {}
     for (var i = 0; i < stadium.discs.length; i++) {
       if (stadium.discs[i]._selected) {
-        if (joint.d0) joint.d1 = i + 1
-        else joint.d0 = i + 1;
+        if (joint.d0 !== undefined) joint.d1 = (stadium.ballPhysics === "disc0") ? i : i + 1;
+        else joint.d0 = (stadium.ballPhysics === "disc0") ? i : i + 1;
       }
     }
     var le = document.getElementById("inputLength").value;
