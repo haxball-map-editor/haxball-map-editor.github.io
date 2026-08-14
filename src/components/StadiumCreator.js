@@ -3836,7 +3836,10 @@ function StadiumCreator() {
     }
   }, [overlay]);
 
-  stadium = JSON.parse(JSON.stringify(stadiumState));
+  if (window._lastStadiumState !== stadiumState) {
+    stadium = JSON.parse(JSON.stringify(stadiumState));
+    window._lastStadiumState = stadiumState;
+  }
 
   useEffect(() => {
     var can = document.getElementById('canvas');
