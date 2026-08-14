@@ -189,13 +189,47 @@ function PropertiesTab() {
   function handleDisc0Toggle(e) {
     let nextStadium;
     if (e.target.checked) {
-      nextStadium = { ...stadiumProperties, ballPhysics: "disc0" };
+      const currentBp = stadiumProperties.ballPhysics || {};
+      const newDisc = {
+        radius: currentBp.radius ?? 10,
+        bCoef: currentBp.bCoef ?? 0.5,
+        cMask: currentBp.cMask ?? ["all"],
+        damping: currentBp.damping ?? 0.99,
+        invMass: currentBp.invMass ?? 1,
+        gravity: currentBp.gravity ?? [0, 0],
+        color: currentBp.color ?? "ffffff",
+        cGroup: currentBp.cGroup ?? ["ball"],
+        pos: [0, 0]
+      };
+      nextStadium = {
+        ...stadiumProperties,
+        ballPhysics: "disc0",
+        discs: [newDisc, ...(stadiumProperties.discs || [])]
+      };
     } else {
-      const defaultBp = {
+      let extractedBp = {
         radius: 10, bCoef: 0.5, cMask: ["all"], damping: 0.99,
         invMass: 1, gravity: [0, 0], color: "ffffff", cGroup: ["ball"]
       };
-      nextStadium = { ...stadiumProperties, ballPhysics: defaultBp };
+      let nextDiscs = stadiumProperties.discs ? [...stadiumProperties.discs] : [];
+      if (nextDiscs.length > 0) {
+        let firstDisc = nextDiscs.shift();
+        extractedBp = {
+          radius: firstDisc.radius ?? 10,
+          bCoef: firstDisc.bCoef ?? 0.5,
+          cMask: firstDisc.cMask ?? ["all"],
+          damping: firstDisc.damping ?? 0.99,
+          invMass: firstDisc.invMass ?? 1,
+          gravity: firstDisc.gravity ?? [0, 0],
+          color: firstDisc.color ?? "ffffff",
+          cGroup: firstDisc.cGroup ?? ["ball"]
+        };
+      }
+      nextStadium = {
+        ...stadiumProperties,
+        ballPhysics: extractedBp,
+        discs: nextDiscs
+      };
     }
     setStadiumProperties(nextStadium);
     dispatch(editStadium(nextStadium));

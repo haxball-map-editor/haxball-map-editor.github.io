@@ -89,7 +89,8 @@ function TextMode() {
           d = indent(l);
           trait = x.trait;
         }
-        ret += (first ? "" : "," + d + indent(l)) + (tag ? "/* " + i + " */ " : "") + pprint(x, l, false, parent);
+        var tagIndex = (parent === 'discs' && stadium.ballPhysics !== "disc0") ? i + 1 : i;
+        ret += (first ? "" : "," + d + indent(l)) + (tag ? "/* " + tagIndex + " */ " : "") + pprint(x, l, false, parent);
         first = false;
       });
 
@@ -105,7 +106,8 @@ function TextMode() {
         var v = j[k];
         if (v !== undefined && k != '_data') {
           var i = k == 'bg' ? 2 : l;
-          ret += (first ? "" : "," + indent(l)) + quote(k) + " : " + pprint(v, i, k == 'vertexes' && i < 10, k);
+          var showTag = ['vertexes', 'segments', 'goals', 'discs', 'planes', 'joints'].includes(k);
+          ret += (first ? "" : "," + indent(l)) + quote(k) + " : " + pprint(v, i, showTag, k);
           first = false;
         }
       });
